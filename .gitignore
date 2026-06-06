@@ -1,6 +1,10 @@
 
-# local data files (provided for debugging, tracked on main)
+# local/stub data files (not part of the codebase)
 2026_Plan-Fact*.xlsx
 Order_calculation_statistics*.xlsx
 MRP_System_v9*.xlsx
+Master_BOM*.xlsx
+Упаковка*.xlsx
+Additional*.xlsx
+Графики_поставщиков/
 __pycache__/
