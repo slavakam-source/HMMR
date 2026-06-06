@@ -3049,7 +3049,8 @@ for ci, (h, w) in enumerate(zip(_GP_FIX_H, _GP_FIX_W), 1):
     hcell(ws_g, 2, ci, h, H_FILL)
     hcell(ws_g, 3, ci, h, H_FILL)
     ws_g.column_dimensions[get_column_letter(ci)].width = w
-ws_g.merge_cells(f'A2:G3')  # fix headers span rows 2-3
+# Fixed headers stay unmerged so Excel can expose autofilter dropdowns
+# for Код/Наименование/Поставщик and the other static columns.
 
 # Месячные метки в строке 2 над днями
 for mnum_m, mlabel_m, ndays_m in MONTHS:
@@ -3153,6 +3154,8 @@ for ri, code in enumerate(mrp_codes, _gp_data_start):
 
 # Условное форматирование
 _gp_last_row = _gp_data_start + len(mrp_codes) - 1
+_gp_filter_last_row = max(_gp_last_row, 3)
+ws_g.auto_filter.ref = f"A3:{get_column_letter(_total_cols_gp)}{_gp_filter_last_row}"
 # Del колонки (H, J, L, ...): зелёный если > 0
 _del_range = f"H{_gp_data_start}:{get_column_letter(_total_cols_gp)}{_gp_last_row}"
 ws_g.conditional_formatting.add(_del_range, _FR_gp(
