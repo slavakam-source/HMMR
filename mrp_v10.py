@@ -32,13 +32,30 @@ warnings.filterwarnings('ignore')
 # ROOT = папка где лежит скрипт. Работает на любом компьютере без изменений.
 ROOT = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
 
+def _is_excel_lock_file(path):
+    """Excel lock/temp files (~$...) are not real workbooks."""
+    return os.path.basename(path).startswith('~$')
+
+def _resolve_excel_path(path):
+    """If a lock file was picked, resolve to the real workbook next to it."""
+    if not path:
+        return path
+    if not _is_excel_lock_file(path):
+        return path
+    real_name = os.path.basename(path)[2:]
+    real_path = os.path.join(os.path.dirname(path), real_name)
+    return real_path if os.path.isfile(real_path) else path
+
 def _latest(folder, *patterns):
     """Возвращает самый свежий файл среди всех паттернов, или None."""
     candidates = []
     for pat in patterns:
         candidates.extend(glob.glob(os.path.join(folder, pat)))
         candidates.extend(glob.glob(os.path.join(folder, '**', pat), recursive=True))
-    candidates = [p for p in candidates if os.path.isfile(p)]
+    candidates = [
+        p for p in candidates
+        if os.path.isfile(p) and not _is_excel_lock_file(p)
+    ]
     return max(candidates, key=os.path.getmtime) if candidates else None
 
 def _require(path, label):
@@ -47,9 +64,9 @@ def _require(path, label):
     return path or ''
 
 # ── Основные файлы ────────────────────────────────────────────
-PF_FILE  = _require(_latest(ROOT, "*Plan-Fact*.xlsx", "*Plan_Fact*.xlsx",
-                             "*план-факт*.xlsx", "*планфакт*.xlsx"),
-                    "Plan-Fact (план производства)")
+PF_FILE  = _resolve_excel_path(_require(_latest(ROOT, "*Plan-Fact*.xlsx", "*Plan_Fact*.xlsx",
+                                                  "*план-факт*.xlsx", "*планфакт*.xlsx"),
+                                       "Plan-Fact (план производства)"))
 
 BOM_FILE = _require(_latest(ROOT, "Master_BOM_актуальный.xlsx",
                              "Master_BOM*.xlsx"),
@@ -155,8 +172,9 @@ _SKIP_IN_STOCK = ['mrp_system','plan-fact','plan_fact','master_bom',
                    'упаковка','additional','order_calc','order calculation','涂装']
 
 # Сортируем все xlsx по дате изменения (сначала новые)
-_all_xlsx = sorted(glob.glob(os.path.join(ROOT, "*.xlsx")),
-                   key=os.path.getmtime, reverse=True)
+_all_xlsx = sorted(
+    (p for p in glob.glob(os.path.join(ROOT, "*.xlsx")) if not _is_excel_lock_file(p)),
+    key=os.path.getmtime, reverse=True)
 
 STOCK_FILES = []
 _seen_groups = set()   # группы, для которых файл уже найден
@@ -1891,7 +1909,11 @@ def _detect_cols(df, hrow, base_cols):
 
 plan_batches={}; batch_info={}
 for tab,cols in TAB_COLS.items():
-    try: df=pd.read_excel(PF_FILE,sheet_name=tab,header=None)
+    try:
+        df=pd.read_excel(PF_FILE,sheet_name=tab,header=None)
+    except PermissionError:
+        print(f"  Cannot read {tab}: файл открыт в Excel. Закройте {os.path.basename(PF_FILE)} и запустите скрипт снова.")
+        continue
     except Exception as e:
         print(f"  Cannot read {tab}: {e}"); continue
     plan_batches[tab]={}
