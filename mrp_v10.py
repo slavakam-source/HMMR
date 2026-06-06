@@ -2479,13 +2479,11 @@ def get_daily_demand(code, month_num):
     if code in bumper_meta:
         bm = bumper_meta[code]
         color_key = bm.get('color_key','')
-        prerestyle_premium = False
         if _is_prerestyle_bumper(code):
             # Дорестайл-бамперы XST33/AST33: заказываются только 2803120/2804104
             # (B02 2WD premium). Варианты 2803130/2804105 на premium не ставятся → 0.
             if not _is_prerestyle_premium_bumper_code(code):
                 return {}
-            prerestyle_premium = True
             applicable_b = _prerestyle_bumper_applicable()
         else:
             applicable_b = bom.get(code, {}).get('configs', {})
@@ -2502,6 +2500,8 @@ def get_daily_demand(code, month_num):
         if not applicable_b:
             return {}
         # ── Дедуплицируем партии только с вкладок из part_tab_map ──
+        # Потребность цвета C = Σ по партиям (машины партии за день × доля цвета C).
+        # Доля цвета берётся из paint statistics (batch → цвет → машины).
         unique_batches = _unique_batches_for_tabs(month_num, tabs)
         use_color_split = bool(color_key and batch_color)
         for tab, bv, day_qty in unique_batches:
@@ -2510,14 +2510,7 @@ def get_daily_demand(code, month_num):
             matched, qty = _bumper_cfg_match(code, cfg_key, applicable_b)
             if not matched:
                 continue
-            if prerestyle_premium and use_color_split:
-                # Каждая партия — один цвет кузова: вся партия идёт на бампер
-                # этого цвета (преобладающий цвет партии из paint stats).
-                dom_color = _batch_dominant_color(bv)
-                if dom_color is None or dom_color != color_key:
-                    continue
-                _bumper_add_batch_demand(daily, day_qty, qty)
-            elif use_color_split:
+            if use_color_split:
                 share = _bumper_color_share(bv, color_key)
                 if share is None or share <= 0:
                     continue
@@ -2602,11 +2595,16 @@ def _debug_bumper_day6(code):
                 if not _ok:
                     continue
                 _clr = bumper_meta.get(code, {}).get('color_key', '')
-                _dom = _batch_dominant_color(_bv)
+                _exact = 'EXACT' if _normalize_batch_id(_bv) in batch_color else 'fuzzy'
                 _bc = _batch_color_lookup(_bv)
+                _tot = sum(_bc.values()) if _bc else 0
+                _share = _bumper_color_share(_bv, _clr)
+                _share_str = 'no_paint' if _share is None else f"{_share:.3f}"
                 _bc_str = ','.join(f"{k}:{int(v)}" for k, v in
-                                   sorted(_bc.items(), key=lambda kv: -kv[1])[:4]) if _bc else 'no_paint'
-                _parts.append(f"{_tab}/{_bv}({_ck})×{_cars6} dom={_dom} [{_bc_str}]")
+                                   sorted(_bc.items(), key=lambda kv: -kv[1])[:5]) if _bc else 'no_paint'
+                _parts.append(
+                    f"{_tab}/{_bv}({_ck}) plan_cars={_cars6} paint={_exact} "
+                    f"paint_total={_tot:.0f} share[{_clr}]={_share_str} -> {_cars6*(_share or 0):.0f} | [{_bc_str}]")
         print(f"    {mlabel} day6={_d6:.0f} clr={bumper_meta.get(code,{}).get('color_key','')}")
         for _p in _parts:
             print(f"        {_p}")
