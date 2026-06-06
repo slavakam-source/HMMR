@@ -408,6 +408,10 @@ B02_4WD_RESTYLE_FRAGMENTS = ('XKN61', 'KN260004', 'KN260005', 'AKN61')
 # — только B02 2WD premium из AS_in_F_A; рестайл XKN61 не входит
 PRERESTYLE_B02_CONFIGS = {'premium'}
 PRERESTYLE_B02_DRIVES = {'2WD'}
+# Дорестайл-бамперы XST33/AST33 (2803120/2804104) ставятся на A01 2WD premium
+# (подтверждено по плану: на 06.06 идут A01 4x2 premium, цвет C3 → бампер AC3).
+PRERESTYLE_PREMIUM_MODEL = 'A01'
+PRERESTYLE_PREMIUM_CFG = 'A01_2WD_premium'
 PRERESTYLE_BUMPER_MARKERS = ('XST33', 'AST33')
 PRERESTYLE_BUMPER_EXCLUDE = ('XKN61', 'KN260004', 'KN260005', 'AKN61')
 # Дорестайл-бамперы B02 2WD premium, которые РЕАЛЬНО заказываются:
@@ -543,12 +547,12 @@ def cfg_match(cfg_key, applicable):
 
 
 def _bumper_cfg_match(code, cfg_key, applicable_b):
-    """Дорестайл-бамперы XST33/AST33 — только точное B02_2WD_premium, без fuzzy/elite."""
+    """Дорестайл-бамперы XST33/AST33 — только точное A01_2WD_premium, без fuzzy/elite."""
     if _is_prerestyle_bumper_code(code):
-        if cfg_key == 'B02_2WD_premium' and 'B02_2WD_premium' in applicable_b:
-            qty = applicable_b['B02_2WD_premium']
+        if cfg_key == PRERESTYLE_PREMIUM_CFG and PRERESTYLE_PREMIUM_CFG in applicable_b:
+            qty = applicable_b[PRERESTYLE_PREMIUM_CFG]
             if isinstance(qty, (int, float)) and qty > 0:
-                return 'B02_2WD_premium', qty
+                return PRERESTYLE_PREMIUM_CFG, qty
         return None, 0
     return cfg_match(cfg_key, applicable_b)
 
@@ -1913,16 +1917,16 @@ for c in list(OBSOLETE_CODES):
     bom.pop(c, None); part_tab_map.pop(c, None); bumper_meta.pop(c, None)
 
 # Бамперы с цветовой раскраской — только вкладка AS_in_F_A (не AS_in_H_B по поставщику)
-# Применяемость B02_2WD_premium назначаем ТОЛЬКО реально заказываемым дорестайл-бамперам
+# Применяемость A01_2WD_premium назначаем ТОЛЬКО реально заказываемым дорестайл-бамперам
 # (передний 2803120 / задний 2804104). Варианты 2803130 / 2804105 на premium не ставятся.
 _prerestyle_bumper_appl = 0
 _prerestyle_bumper_zero = 0
 for _bcode in bumper_clr_map:
     CODE_TAB_OVERRIDES[_bcode] = 'AS_in_F_A'
     if _is_prerestyle_premium_bumper_code(_bcode):
-        BOM_APPLICABILITY_OVERRIDES[_bcode] = {'B02_2WD_premium'}
+        BOM_APPLICABILITY_OVERRIDES[_bcode] = {PRERESTYLE_PREMIUM_CFG}
         if _bcode in bom:
-            bom[_bcode]['configs'] = {'B02_2WD_premium': 1}
+            bom[_bcode]['configs'] = {PRERESTYLE_PREMIUM_CFG: 1}
         _prerestyle_bumper_appl += 1
     elif _is_prerestyle_bumper_code(_bcode):
         # 2803130 / 2804105 — не заказываются: убираем применяемость
@@ -1931,7 +1935,7 @@ for _bcode in bumper_clr_map:
             bom[_bcode]['configs'] = {}
         _prerestyle_bumper_zero += 1
 if _prerestyle_bumper_appl:
-    print(f"  Дорестайл-бамперы 2803120/2804104: B02_2WD_premium → {_prerestyle_bumper_appl} кодов")
+    print(f"  Дорестайл-бамперы 2803120/2804104: {PRERESTYLE_PREMIUM_CFG} → {_prerestyle_bumper_appl} кодов")
 if _prerestyle_bumper_zero:
     print(f"  Дорестайл-бамперы 2803130/2804105: не заказываются → {_prerestyle_bumper_zero} кодов (потребность 0)")
 
@@ -2377,7 +2381,7 @@ def _is_prerestyle_bumper(code):
 
 
 def _prerestyle_bumper_applicable():
-    return {'B02_2WD_premium': 1}
+    return {PRERESTYLE_PREMIUM_CFG: 1}
 
 
 def _bumper_batch_cfg_key(bi, code=''):
@@ -2389,7 +2393,7 @@ def _bumper_batch_cfg_key(bi, code=''):
     drive = bi.get('drive', '') or ''
     config = bi.get('config', '') or ''
     if code and _is_prerestyle_bumper_code(code):
-        if model == 'B02' and config in PRERESTYLE_B02_CONFIGS and not drive:
+        if model == PRERESTYLE_PREMIUM_MODEL and config in PRERESTYLE_B02_CONFIGS and not drive:
             drive = '2WD'
     return f"{model}_{drive}_{config}"
 
@@ -2499,7 +2503,7 @@ def get_daily_demand(code, month_num):
                 if any(p in code for p in ('XKN61', 'KN260004', 'KN260005')):
                     applicable_b = {'B02_4WD_elite': 1, 'B02_4WD_TechPlus': 1}
                 elif any(p in code for p in ('XST33', 'AST33', 'AKN02')):
-                    applicable_b = {'B02_2WD_premium': 1}
+                    applicable_b = {PRERESTYLE_PREMIUM_CFG: 1}
         if not applicable_b:
             return {}
         # ── Дедуплицируем партии только с вкладок из part_tab_map ──
