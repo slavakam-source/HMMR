@@ -118,21 +118,6 @@ THEOR_STOCK_FILE = _latest(ROOT,
 
 OUT      = os.path.join(ROOT, "MRP_System_v9.xlsx")
 
-def _find_demand_reference_file():
-    """Файл сверки потребности (эталон vs MRP)."""
-    candidates = []
-    for pat in ('*Ошибки*потребност*.xlsx', '*ошибки*потребност*.xlsx',
-                'Ошибки потребности.xlsx', 'Ошибки_потребности.xlsx'):
-        candidates.extend(glob.glob(os.path.join(ROOT, pat)))
-    for folder in (ROOT, os.path.join(os.path.expanduser('~'), 'Downloads')):
-        p = os.path.join(folder, 'Ошибки потребности.xlsx')
-        if os.path.isfile(p) and not _is_excel_lock_file(p):
-            candidates.append(p)
-    candidates = [p for p in candidates if os.path.isfile(p) and not _is_excel_lock_file(p)]
-    return max(candidates, key=os.path.getmtime) if candidates else None
-
-DEMAND_REF_FILE = _resolve_excel_path(_find_demand_reference_file() or '')
-
 # ── Paint statistics: авто-генерация из GWM-файла ─────────────
 # 1. Ищем входной GWM-файл (各车型成套批次统计表) в папке MRP
 # 2. Если найден — запускаем build_order_calc_v2 для генерации статистики
@@ -249,10 +234,6 @@ print(f"[INIT] BOM:       {os.path.basename(BOM_FILE) if BOM_FILE else '❌ НЕ
 print(f"[INIT] Теор.ост.: {os.path.basename(THEOR_STOCK_FILE) if THEOR_STOCK_FILE else 'не найден (необязательно)'}")
 print(f"[INIT] Бамперы:   {os.path.basename(BUMPER_FILE) if BUMPER_FILE else '❌ НЕ НАЙДЕН'}")
 print(f"[INIT] PaintStats:{os.path.basename(PAINT_STATS) if PAINT_STATS and os.path.exists(PAINT_STATS) else '❌ НЕ НАЙДЕН'}")
-if DEMAND_REF_FILE and os.path.exists(DEMAND_REF_FILE):
-    print(f"[INIT] Сверка потребности: {os.path.basename(DEMAND_REF_FILE)}")
-else:
-    print("[INIT] Сверка потребности: положите «Ошибки потребности.xlsx» в папку скрипта или Downloads")
 print(f"[INIT] Найдено {len(STOCK_FILES)} файлов остатков (берётся самый свежий из каждого типа):")
 for p in STOCK_FILES:
     print(f"       ✅ {os.path.basename(p)}")
@@ -429,6 +410,11 @@ PRERESTYLE_B02_CONFIGS = {'premium'}
 PRERESTYLE_B02_DRIVES = {'2WD'}
 PRERESTYLE_BUMPER_MARKERS = ('XST33', 'AST33')
 PRERESTYLE_BUMPER_EXCLUDE = ('XKN61', 'KN260004', 'KN260005', 'AKN61')
+# Дорестайл-бамперы B02 2WD premium, которые РЕАЛЬНО заказываются:
+#   передний 2803120XST33*  и  задний 2804104AST33*
+# Варианты 2803130XST33* / 2804105AST33* — это другая (не premium) модификация,
+# на B02 2WD premium не ставится → потребность 0 (замечания пользователя 06.06).
+PRERESTYLE_PREMIUM_BUMPER_PREFIXES = ('2803120XST33', '2804104AST33')
 
 
 def _is_prerestyle_bumper_code(code):
@@ -436,6 +422,14 @@ def _is_prerestyle_bumper_code(code):
     if any(x in c for x in PRERESTYLE_BUMPER_EXCLUDE):
         return False
     return any(m in c for m in PRERESTYLE_BUMPER_MARKERS)
+
+
+def _is_prerestyle_premium_bumper_code(code):
+    """Дорестайл-бампер, который ставится на B02 2WD premium (2803120/2804104)."""
+    if not _is_prerestyle_bumper_code(code):
+        return False
+    c = str(code)
+    return any(c.startswith(p) for p in PRERESTYLE_PREMIUM_BUMPER_PREFIXES)
 
 
 def _normalize_batch_id(bv):
@@ -1919,16 +1913,27 @@ for c in list(OBSOLETE_CODES):
     bom.pop(c, None); part_tab_map.pop(c, None); bumper_meta.pop(c, None)
 
 # Бамперы с цветовой раскраской — только вкладка AS_in_F_A (не AS_in_H_B по поставщику)
+# Применяемость B02_2WD_premium назначаем ТОЛЬКО реально заказываемым дорестайл-бамперам
+# (передний 2803120 / задний 2804104). Варианты 2803130 / 2804105 на premium не ставятся.
 _prerestyle_bumper_appl = 0
+_prerestyle_bumper_zero = 0
 for _bcode in bumper_clr_map:
     CODE_TAB_OVERRIDES[_bcode] = 'AS_in_F_A'
-    if _is_prerestyle_bumper_code(_bcode):
+    if _is_prerestyle_premium_bumper_code(_bcode):
         BOM_APPLICABILITY_OVERRIDES[_bcode] = {'B02_2WD_premium'}
         if _bcode in bom:
             bom[_bcode]['configs'] = {'B02_2WD_premium': 1}
-            _prerestyle_bumper_appl += 1
+        _prerestyle_bumper_appl += 1
+    elif _is_prerestyle_bumper_code(_bcode):
+        # 2803130 / 2804105 — не заказываются: убираем применяемость
+        BOM_APPLICABILITY_OVERRIDES[_bcode] = set()
+        if _bcode in bom:
+            bom[_bcode]['configs'] = {}
+        _prerestyle_bumper_zero += 1
 if _prerestyle_bumper_appl:
-    print(f"  Дорестайл-бамперы XST33/AST33: B02_2WD_premium → {_prerestyle_bumper_appl} кодов")
+    print(f"  Дорестайл-бамперы 2803120/2804104: B02_2WD_premium → {_prerestyle_bumper_appl} кодов")
+if _prerestyle_bumper_zero:
+    print(f"  Дорестайл-бамперы 2803130/2804105: не заказываются → {_prerestyle_bumper_zero} кодов (потребность 0)")
 
 # ── Default упаковка для бамперов = 8 шт (если в BOM пусто или 1) ──
 DEFAULT_BUMPER_PKG = 8
@@ -2228,336 +2233,6 @@ if os.path.exists(PAINT_STATS):
 else:
     print(f"  ⚠️  Файл не найден: {PAINT_STATS}")
 
-# ═══ Сверка потребности с эталоном (Ошибки потребности.xlsx) ═══
-demand_ref_data = {}
-demand_mismatches = []
-
-def _normalize_part_code(code):
-    return re.sub(r'\s+', '', str(code or '').strip()).upper()
-
-_PART_CODE_RE = re.compile(
-    r'^(?:AL[A-Z]{2}\d{4,}|\d{7,}[A-Z0-9]{2,}|[A-Z]{2}\d{5,}[A-Z0-9]*)$',
-    re.IGNORECASE)
-
-def _ref_looks_like_part_code(val):
-    c = _normalize_part_code(val)
-    if len(c) < 8:
-        return False
-    if _PART_CODE_RE.match(c):
-        return True
-    if re.match(r'^\d{7,}[A-Z]', c):
-        return True
-    if re.match(r'^AL[A-Z]{2}\d', c, re.I):
-        return True
-    return False
-
-def _ref_cell_str(val):
-    if val is None or (isinstance(val, float) and pd.isna(val)):
-        return ''
-    if isinstance(val, (datetime.datetime, datetime.date)):
-        return val.strftime('%d.%m.%Y')
-    return str(val).strip()
-
-def _ref_header_keywords():
-    return ('код', 'code', 'артикул', 'деталь', 'part', 'номер', 'sku', 'material', 'материал')
-
-def _ref_is_qty_avoid_header(hs):
-    return any(x in hs for x in (
-        'mrp', 'расчёт', 'расчет', 'посчит', 'систем', 'ошибка', 'разниц', 'delta',
-        'коммент', 'примеч', 'наимен', 'поставщ', 'ед.', 'ед ', 'вкладк', 'остаток',
-        'дефицит', 'тип', 'норма'))
-
-def _ref_is_ref_qty_header(hs):
-    if _ref_is_qty_avoid_header(hs):
-        return False
-    return any(x in hs for x in (
-        'эталон', 'реальн', 'факт', 'правильн', 'должн', 'верно', 'нужн', 'ожида',
-        'склад', 'план', 'истин'))
-
-def _ref_parse_date_from_text(text):
-    s = str(text or '').strip()
-    if not s:
-        return None, None
-    if isinstance(text, (datetime.datetime, datetime.date)):
-        return text.month, text.day
-    if hasattr(text, 'month') and hasattr(text, 'day'):
-        try:
-            return int(text.month), int(text.day)
-        except (TypeError, ValueError):
-            pass
-    m = re.search(r'(\d{1,2})[./](\d{1,2})[./](\d{2,4})', s)
-    if m:
-        return int(m.group(2)), int(m.group(1))
-    m = re.search(r'(\d{1,2})[./](\d{1,2})(?:\D|$)', s)
-    if m:
-        day, month = int(m.group(1)), int(m.group(2))
-        if 1 <= month <= 12 and 1 <= day <= 31:
-            for mnum, _, _ in MONTHS:
-                if mnum == month:
-                    return mnum, day
-    return None, None
-
-def _ref_parse_qty(val):
-    if val is None or (isinstance(val, float) and pd.isna(val)):
-        return None
-    if isinstance(val, (int, float)):
-        return float(val)
-    s = str(val).strip().replace('\xa0', '').replace(' ', '').replace(',', '.')
-    if not s or s in ('—', '-', '–'):
-        return 0.0
-    try:
-        return float(s)
-    except ValueError:
-        return None
-
-def _ref_month_num(val, sheet_name=''):
-    if val is None or (isinstance(val, float) and pd.isna(val)):
-        val = sheet_name
-    if isinstance(val, datetime.datetime):
-        return val.month
-    if isinstance(val, datetime.date):
-        return val.month
-    s = str(val or '').strip().lower()
-    if not s:
-        for mnum, mlabel, _ in MONTHS:
-            if mlabel[:3].lower() in sheet_name.lower() or _M_RU[mnum].lower() in sheet_name.lower():
-                return mnum
-        return None
-    try:
-        n = int(float(s))
-        if 1 <= n <= 12:
-            for mnum, _, _ in MONTHS:
-                if mnum == n:
-                    return mnum
-    except (TypeError, ValueError):
-        pass
-    for mnum, mlabel, _ in MONTHS:
-        if mlabel.lower() in s or mlabel[:3].lower() in s or _M_RU[mnum].lower() in s:
-            return mnum
-        if f"{mnum:02d}" in s and any(x in s for x in ('мес', 'month', '20')):
-            return mnum
-    return None
-
-def _ref_day_num(val):
-    if val is None or (isinstance(val, float) and pd.isna(val)):
-        return None
-    if isinstance(val, datetime.datetime):
-        return val.day
-    if isinstance(val, datetime.date):
-        return val.day
-    s = str(val).strip()
-    if re.match(r'^\d{1,2}\.\d{1,2}\.\d{2,4}$', s):
-        parts = s.split('.')
-        try:
-            return int(parts[0])
-        except ValueError:
-            return None
-    try:
-        d = int(float(s))
-        return d if 1 <= d <= 31 else None
-    except (TypeError, ValueError):
-        return None
-
-def _ref_resolve_point(month_val, day_val, date_val=None, sheet_name=''):
-    if isinstance(date_val, (datetime.datetime, datetime.date)):
-        return date_val.month, date_val.day
-    mnum = _ref_month_num(month_val, sheet_name)
-    day = _ref_day_num(day_val)
-    if mnum is None and date_val is not None:
-        ds = str(date_val).strip()
-        m = re.search(r'(\d{1,2})\.(\d{1,2})\.(\d{2,4})', ds)
-        if m:
-            return int(m.group(2)), int(m.group(1))
-    return mnum, day
-
-def _ref_col_idx(headers, *keywords):
-    for i, h in enumerate(headers):
-        hs = str(h or '').lower().replace('\n', ' ')
-        if any(kw in hs for kw in keywords):
-            return i
-    return None
-
-def _ref_add_point(out, code, mnum, day, qty):
-    if not code or mnum is None or day is None:
-        return
-    if mnum not in {m for m, _, _ in MONTHS}:
-        return
-    nd = next((n for m, _, n in MONTHS if m == mnum), 31)
-    if not (1 <= day <= nd):
-        return
-    q = _ref_parse_qty(qty)
-    if q is None:
-        return
-    out[(code, mnum, day)] = q
-
-def _parse_demand_reference_grid(df, sheet_name, out):
-    if df.empty:
-        return 0
-    code_col = None
-    header_row = None
-    for ri in range(min(15, len(df))):
-        row = [str(v).strip().lower() if pd.notna(v) else '' for v in df.iloc[ri]]
-        if any('код' in c or 'code' in c or 'артикул' in c for c in row):
-            code_col = next((i for i, c in enumerate(row) if 'код' in c or 'code' in c or 'артикул' in c), 0)
-            header_row = ri
-            break
-    if header_row is None:
-        return 0
-    headers = df.iloc[header_row].tolist()
-    day_cols = []
-    for ci, h in enumerate(headers):
-        if ci == code_col:
-            continue
-        try:
-            d = int(float(str(h).strip()))
-            if 1 <= d <= 31:
-                day_cols.append((ci, d))
-        except (TypeError, ValueError):
-            pass
-    if not day_cols:
-        return 0
-    month_col = _ref_col_idx(headers, 'месяц', 'month', 'мес')
-    mnum_sheet = _ref_month_num(None, sheet_name)
-    n_added = 0
-    for ri in range(header_row + 1, len(df)):
-        row = df.iloc[ri]
-        code = _normalize_part_code(row.iloc[code_col] if code_col < len(row) else '')
-        if not code or len(code) < 4:
-            continue
-        mnum = _ref_month_num(row.iloc[month_col], sheet_name) if month_col is not None else mnum_sheet
-        if mnum is None:
-            continue
-        for ci, day in day_cols:
-            if ci >= len(row):
-                continue
-            q = _ref_parse_qty(row.iloc[ci])
-            if q is None:
-                continue
-            _ref_add_point(out, code, mnum, day, q)
-            n_added += 1
-    return n_added
-
-def _parse_demand_reference_long(df, sheet_name, out):
-    if df.empty:
-        return 0
-    header_row = None
-    for ri in range(min(20, len(df))):
-        row = [str(v).strip().lower() if pd.notna(v) else '' for v in df.iloc[ri]]
-        if any('код' in c or 'code' in c for c in row):
-            header_row = ri
-            break
-    if header_row is None:
-        return 0
-    headers = df.iloc[header_row].tolist()
-    code_i = _ref_col_idx(headers, 'код', 'code', 'артикул', 'деталь')
-    if code_i is None:
-        code_i = 0
-    month_i = _ref_col_idx(headers, 'месяц', 'month', 'мес')
-    day_i = _ref_col_idx(headers, 'день', 'day', 'число')
-    date_i = _ref_col_idx(headers, 'дата', 'date')
-    qty_i = _ref_col_idx(headers, 'эталон', 'реальн', 'факт', 'правильн', 'должн', 'ожида',
-                         'потребност', 'спрос', 'кол', 'qty', 'кол-во', 'количество')
-    skip_i = _ref_col_idx(headers, 'mrp', 'расчёт', 'расчет', 'ошибка', 'разниц', 'коммент', 'примеч')
-    if qty_i is None:
-        for ci, h in enumerate(headers):
-            if ci in (code_i, month_i, day_i, date_i, skip_i):
-                continue
-            hs = str(h or '').lower()
-            if any(x in hs for x in ('эталон', 'реальн', 'факт', 'ожида', 'должн')):
-                qty_i = ci
-                break
-    if qty_i is None:
-        numeric_cols = []
-        for ci in range(len(headers)):
-            if ci in (code_i, month_i, day_i, date_i):
-                continue
-            hs = str(headers[ci] or '').lower()
-            if skip_i is not None and ci == skip_i:
-                continue
-            if any(x in hs for x in ('mrp', 'расчёт', 'расчет', 'ошибка', 'разниц')):
-                continue
-            vals = [_ref_parse_qty(v) for v in df.iloc[header_row + 1:header_row + 8, ci]
-                    if ci < df.shape[1]]
-            if any(v is not None for v in vals):
-                numeric_cols.append(ci)
-        if len(numeric_cols) == 1:
-            qty_i = numeric_cols[0]
-    if qty_i is None:
-        return 0
-    n_added = 0
-    for ri in range(header_row + 1, len(df)):
-        row = df.iloc[ri]
-        code = _normalize_part_code(row.iloc[code_i] if code_i < len(row) else '')
-        if not code or len(code) < 4:
-            continue
-        month_val = row.iloc[month_i] if month_i is not None and month_i < len(row) else None
-        day_val = row.iloc[day_i] if day_i is not None and day_i < len(row) else None
-        date_val = row.iloc[date_i] if date_i is not None and date_i < len(row) else None
-        mnum, day = _ref_resolve_point(month_val, day_val, date_val, sheet_name)
-        if mnum is None or day is None:
-            continue
-        q = _ref_parse_qty(row.iloc[qty_i] if qty_i < len(row) else None)
-        if q is None:
-            continue
-        _ref_add_point(out, code, mnum, day, q)
-        n_added += 1
-    return n_added
-
-def _parse_demand_reference(path):
-    """Читает эталонную потребность из «Ошибки потребности.xlsx»."""
-    out = {}
-    if not path or not os.path.isfile(path):
-        return out
-    try:
-        xl = pd.ExcelFile(path)
-    except Exception as e:
-        print(f"  ⚠️  Сверка потребности: не удалось открыть {os.path.basename(path)}: {e}")
-        return out
-    total = 0
-    for sheet in xl.sheet_names:
-        try:
-            df = pd.read_excel(path, sheet_name=sheet, header=None)
-        except Exception:
-            continue
-        n = _parse_demand_reference_long(df, sheet, out)
-        if n == 0:
-            n = _parse_demand_reference_grid(df, sheet, out)
-        total += n
-    print(f"  Сверка потребности: загружено {len(out)} точек ({total} ячеек) из {os.path.basename(path)}")
-    return out
-
-def _demand_code_lookup(code, code_index):
-    c = _normalize_part_code(code)
-    if c in code_index:
-        return code_index[c]
-    for k, v in code_index.items():
-        if k.upper() == c:
-            return v
-    return c
-
-def _compare_demand_with_reference(demand_map, ref_map, codes):
-    """Сравнивает расчёт MRP с эталоном. Возвращает список расхождений."""
-    code_index = {_normalize_part_code(c): c for c in codes}
-    mismatches = []
-    tol = 0.49
-    for (ref_code, mnum, day), ref_qty in sorted(ref_map.items()):
-        code = _demand_code_lookup(ref_code, code_index)
-        mrp_qty = demand_map.get(code, {}).get(mnum, {}).get(day, 0) or 0
-        ref_qty = ref_qty or 0
-        delta = round(mrp_qty - ref_qty, 2)
-        if abs(delta) <= tol:
-            status = 'OK'
-        elif mrp_qty > ref_qty:
-            status = 'лишняя'
-        else:
-            status = 'недостаёт'
-        if status != 'OK':
-            mismatches.append({
-                'code': code, 'ref_code': ref_code, 'month': mnum, 'day': day,
-                'ref': ref_qty, 'mrp': mrp_qty, 'delta': delta, 'status': status,
-            })
-    return mismatches
-
 # ═══ STEP 6: Demand (V7 logic) ════════════════════════════════
 def _unique_batches_for_tabs(month_num, tabs):
     """Уникальные (вкладка, партия) с выбранных листов — метаданные не смешиваются."""
@@ -2690,6 +2365,13 @@ def _batch_color_lookup(bv):
         return batch_color[matches[0]]
     return {}
 
+def _batch_dominant_color(bv):
+    """Преобладающий цвет кузова партии (из paint stats). None если данных нет."""
+    bc = _batch_color_lookup(bv)
+    if not bc:
+        return None
+    return max(bc.items(), key=lambda kv: kv[1])[0]
+
 def _is_prerestyle_bumper(code):
     return code in bumper_meta and _is_prerestyle_bumper_code(code)
 
@@ -2797,7 +2479,13 @@ def get_daily_demand(code, month_num):
     if code in bumper_meta:
         bm = bumper_meta[code]
         color_key = bm.get('color_key','')
+        prerestyle_premium = False
         if _is_prerestyle_bumper(code):
+            # Дорестайл-бамперы XST33/AST33: заказываются только 2803120/2804104
+            # (B02 2WD premium). Варианты 2803130/2804105 на premium не ставятся → 0.
+            if not _is_prerestyle_premium_bumper_code(code):
+                return {}
+            prerestyle_premium = True
             applicable_b = _prerestyle_bumper_applicable()
         else:
             applicable_b = bom.get(code, {}).get('configs', {})
@@ -2822,7 +2510,14 @@ def get_daily_demand(code, month_num):
             matched, qty = _bumper_cfg_match(code, cfg_key, applicable_b)
             if not matched:
                 continue
-            if use_color_split:
+            if prerestyle_premium and use_color_split:
+                # Каждая партия — один цвет кузова: вся партия идёт на бампер
+                # этого цвета (преобладающий цвет партии из paint stats).
+                dom_color = _batch_dominant_color(bv)
+                if dom_color is None or dom_color != color_key:
+                    continue
+                _bumper_add_batch_demand(daily, day_qty, qty)
+            elif use_color_split:
                 share = _bumper_color_share(bv, color_key)
                 if share is None or share <= 0:
                     continue
@@ -2907,21 +2602,21 @@ def _debug_bumper_day6(code):
                 if not _ok:
                     continue
                 _clr = bumper_meta.get(code, {}).get('color_key', '')
-                _share = _bumper_color_share(_bv, _clr)
-                if _share is None:
-                    _parts.append(f"{_tab}/{_bv}({_ck})×{_cars6}×no_paint")
-                elif _share <= 0:
-                    continue
-                else:
-                    _parts.append(f"{_tab}/{_bv}({_ck})×{_cars6}×{_share:.2f}")
-        print(f"    {mlabel} day6={_d6:.0f}  batches: {', '.join(_parts) if _parts else '—'}")
+                _dom = _batch_dominant_color(_bv)
+                _bc = _batch_color_lookup(_bv)
+                _bc_str = ','.join(f"{k}:{int(v)}" for k, v in
+                                   sorted(_bc.items(), key=lambda kv: -kv[1])[:4]) if _bc else 'no_paint'
+                _parts.append(f"{_tab}/{_bv}({_ck})×{_cars6} dom={_dom} [{_bc_str}]")
+        print(f"    {mlabel} day6={_d6:.0f} clr={bumper_meta.get(code,{}).get('color_key','')}")
+        for _p in _parts:
+            print(f"        {_p}")
 
 
 _PRERESTYLE_BUMPER_DEBUG = (
     '2803120XST33A8T', '2804104AST33A8T',
     '2803120XST33A9C', '2804104AST33A9C',
     '2803120XST33AC3', '2804104AST33AC3',
-    '2803130XST33A9C', '2804105AST33A9C',
+    '2803130XST33AC3', '2804105AST33AC3',
 )
 for _dbc in _PRERESTYLE_BUMPER_DEBUG:
     _debug_bumper_day6(_dbc)
@@ -2947,23 +2642,6 @@ for _supp_key in sorted(set(normalize_supplier(bom.get(c, {}).get('supplier', ''
                                for _c in mrp_codes
                                if normalize_supplier(bom.get(_c, {}).get('supplier', '')) == _supp_key)
     print(f"    {_supp_key}: {_parts} поз. | {', '.join(_month_totals)} | day6={_day6_total:.0f}")
-
-if DEMAND_REF_FILE and os.path.exists(DEMAND_REF_FILE):
-    print("\nСверка с эталоном (Ошибки потребности.xlsx)...")
-    demand_ref_data = _parse_demand_reference(DEMAND_REF_FILE)
-    if demand_ref_data:
-        demand_mismatches = _compare_demand_with_reference(demand, demand_ref_data, mrp_codes)
-        if demand_mismatches:
-            print(f"  ❌ Расхождений: {len(demand_mismatches)}")
-            for mm in demand_mismatches[:40]:
-                mlabel = next((ml for mn, ml, _ in MONTHS if mn == mm['month']), str(mm['month']))
-                print(f"    {mm['code']} {mlabel} day{mm['day']}: эталон={mm['ref']:.0f} MRP={mm['mrp']:.0f} ({mm['status']})")
-            if len(demand_mismatches) > 40:
-                print(f"    ... ещё {len(demand_mismatches) - 40}")
-        else:
-            print("  ✅ Все точки эталона совпали с расчётом MRP")
-    else:
-        print("  ⚠️  Эталон пуст — проверьте формат листа (код, месяц/дата, эталонная потребность)")
 
 def get_info(code):
     if code in bom:
@@ -3522,57 +3200,6 @@ for mi,(mnum,mlabel,n_days) in enumerate(MONTHS):
                 c.font=Font(size=9,name="Arial")
             if fb: c.fill=fb
             c.alignment=Alignment(horizontal='center',vertical='center')
-
-# ── Сверка_потребности (эталон vs MRP) ───────────────────────
-if demand_ref_data:
-    print("  Сверка_потребности...")
-    ws_cmp = wb_out.create_sheet('Сверка_потребности')
-    ws_cmp.freeze_panes = 'A3'
-    ws_cmp.row_dimensions[1].height = 36
-    ws_cmp.row_dimensions[2].height = 28
-    cmp_hdrs = ['Код детали', 'Наименование', 'Поставщик', 'Месяц', 'День',
-                'Эталон', 'MRP', 'Δ', 'Статус']
-    cmp_widths = [22, 40, 14, 10, 6, 10, 10, 10, 12]
-    for ci, (h, w) in enumerate(zip(cmp_hdrs, cmp_widths), 1):
-        hcell(ws_cmp, 1, ci, h, H_FILL)
-        ws_cmp.column_dimensions[get_column_letter(ci)].width = w
-    t_cmp = ws_cmp.cell(2, 1)
-    src_nm = os.path.basename(DEMAND_REF_FILE) if DEMAND_REF_FILE else 'эталон'
-    n_ok = len(demand_ref_data) - len(demand_mismatches)
-    t_cmp.value = (f"Сверка с «{src_nm}»: {len(demand_ref_data)} точек | "
-                   f"совпало {n_ok} | расхождений {len(demand_mismatches)}")
-    t_cmp.font = Font(italic=True, size=9, color="333333", name="Arial")
-    ws_cmp.merge_cells(f'A2:{get_column_letter(len(cmp_hdrs))}2')
-    cmp_rows = []
-    for (ref_code, mnum, day), ref_qty in sorted(demand_ref_data.items()):
-        code = _demand_code_lookup(ref_code, {_normalize_part_code(c): c for c in mrp_codes})
-        mrp_qty = demand.get(code, {}).get(mnum, {}).get(day, 0) or 0
-        delta = round(mrp_qty - (ref_qty or 0), 2)
-        if abs(delta) <= 0.49:
-            status = 'OK'
-        elif mrp_qty > (ref_qty or 0):
-            status = 'лишняя'
-        else:
-            status = 'недостаёт'
-        cmp_rows.append((code, mnum, day, ref_qty or 0, mrp_qty, delta, status))
-    cmp_rows.sort(key=lambda r: (0 if r[6] != 'OK' else 1, r[0], r[1], r[2]))
-    for ri, (code, mnum, day, ref_qty, mrp_qty, delta, status) in enumerate(cmp_rows, 3):
-        ws_cmp.row_dimensions[ri].height = 14
-        name, supp, _ = get_info(code)
-        mlabel = next((ml for mn, ml, _ in MONTHS if mn == mnum), str(mnum))
-        vals = [code, name[:45], supp, mlabel, day, ref_qty, mrp_qty, delta, status]
-        row_fill = RED_F if status != 'OK' else (GRY_F if ri % 2 == 0 else NO_F)
-        for ci, v in enumerate(vals, 1):
-            c = ws_cmp.cell(ri, ci)
-            c.value = v
-            c.font = Font(size=9, name="Arial", bold=(status != 'OK' and ci == 9))
-            c.alignment = Alignment(horizontal='center' if ci > 2 else 'left', vertical='center')
-            if ci in (6, 7, 8):
-                c.number_format = '#,##0.##'
-            if status != 'OK':
-                c.fill = RED_F if ci >= 6 else row_fill
-            elif row_fill != NO_F:
-                c.fill = row_fill
 
 # ── Нормы_Расхода (г/кг материалы) ──────────────────────────
 print("  Нормы_Расхода...")
