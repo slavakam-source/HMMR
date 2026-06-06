@@ -318,6 +318,9 @@ SUPPLIER_TAB_MAP = {
 # Формат: код → множество разрешённых конфигурационных ключей.
 # Применяется ПОСЛЕ загрузки BOM — перезаписывает данные из xlsx-файла.
 BOM_APPLICABILITY_OVERRIDES = {
+    # Задние дорестайл-бамперы: только B02 2WD premium
+    '2803130XST33A9C': {'B02_2WD_premium'},
+    '2804105AST33A9C': {'B02_2WD_premium'},
     # LK015530 (SGK): в BOM ошибочно помечен на B02+B04; должен только B04
     'LK015530': {'B04_4WD_TechPlus', 'B04_4WD_premium'},
     # 1101100XKJ23A (Yapp): в BOM нет отметок о применяемости → без override
@@ -372,6 +375,41 @@ B02_ALL_THREE = frozenset({'B02_2WD_premium', 'B02_4WD_elite', 'B02_4WD_TechPlus
 B02_PREM_2WD_ONLY_FRAGMENTS = ('XST33', 'AST33', 'AKN02')
 # Рестайл B02 4WD: бамперы/кузовные XKN61 — только 4WD, не elite 2WD
 B02_4WD_RESTYLE_FRAGMENTS = ('XKN61', 'KN260004', 'KN260005', 'AKN61')
+# Задние дорестайл-бамперы XST33/AST33 — только B02 2WD premium из AS_in_F_A
+PRERESTYLE_B02_CONFIGS = {'premium'}
+PRERESTYLE_B02_DRIVES = {'2WD'}
+REAR_PRERESTYLE_BUMPER_PREFIXES = (
+    '2803130XST33', '2803130AST33', '2804105AST33', '2804105XST33',
+)
+
+
+def _is_rear_prerestyle_bumper_code(code):
+    return any(str(code).startswith(p) for p in REAR_PRERESTYLE_BUMPER_PREFIXES)
+
+
+def _normalize_batch_id(bv):
+    return re.sub(r'\s+', '', str(bv or '').strip().upper())
+
+
+def _map_plan_config(value):
+    s = str(value or '').strip()
+    if not s:
+        return ''
+    if s in CONFIG_MAP:
+        return CONFIG_MAP[s]
+    sl = s.lower()
+    for k, v in CONFIG_MAP.items():
+        if k.lower() == sl:
+            return v
+    if 'tech' in sl and 'plus' in sl:
+        return 'TechPlus'
+    if 'premium' in sl or '高配' in s:
+        return 'premium'
+    if 'elite' in sl or '中配' in s:
+        return 'elite'
+    if 'comfort' in sl or '低配' in s:
+        return 'comfort'
+    return ''
 
 
 def _bom_header_has_b02_2wd_elite(hdr_row):
@@ -391,6 +429,8 @@ def detect_cfg_keys_from_header(hdr_row):
 
 def should_mark_b02_2wd_elite(code, cfgs):
     """Деталь для всех B02 / всех B02 2WD / всех B02 Elite → B02_2WD_elite."""
+    if _is_rear_prerestyle_bumper_code(code):
+        return False
     if not cfgs or 'B02_2WD_elite' in cfgs:
         return False
     if not any(k.startswith('B02_') for k in cfgs):
@@ -453,6 +493,17 @@ def cfg_match(cfg_key, applicable):
             qty = applicable[alt] if isinstance(applicable, dict) else 1
             return alt, qty
     return None, 0
+
+
+def _bumper_cfg_match(code, cfg_key, applicable_b):
+    """Задние дорестайл-бамперы — только точное B02_2WD_premium, без fuzzy/elite."""
+    if _is_rear_prerestyle_bumper_code(code):
+        if cfg_key == 'B02_2WD_premium' and 'B02_2WD_premium' in applicable_b:
+            qty = applicable_b['B02_2WD_premium']
+            if isinstance(qty, (int, float)) and qty > 0:
+                return 'B02_2WD_premium', qty
+        return None, 0
+    return cfg_match(cfg_key, applicable_b)
 
 
 
@@ -1238,7 +1289,8 @@ def load_bom_from_live_output(path):
                 cfgs[cfg_key] = v
         if code in B16_ELITE:
             cfgs.setdefault('B16_4WD_elite', 1)
-        apply_b02_2wd_elite_marks(cfgs, code)
+        if not _is_rear_prerestyle_bumper_code(code):
+            apply_b02_2wd_elite_marks(cfgs, code)
 
         pkg = 1
         if row[27] is not None:
@@ -1398,7 +1450,8 @@ if not BOM_LIVE_ACTIVE:
                 cfgs[cfg] = qty
         if code in B16_ELITE:
             cfgs.setdefault('B16_4WD_elite', 1)
-        apply_b02_2wd_elite_marks(cfgs, code)
+        if not _is_rear_prerestyle_bumper_code(code):
+            apply_b02_2wd_elite_marks(cfgs, code)
         pkg_from_bom = None
         _pkg_col = 27
         if _pkg_col < len(row) and row[_pkg_col] is not None:
@@ -1631,25 +1684,29 @@ print(f"  Переопределено упаковок (PACKAGE_OVERRIDES): {pk
       + (" | LIVE: сохранены упаковки из BOM_Детальный" if BOM_LIVE_ACTIVE else ""))
 
 # ── Применяем переопределения применяемости BOM (BOM_APPLICABILITY_OVERRIDES) ──
-# В LIVE-режиме применяемость берётся только из BOM_Детальный (ручные ✓)
 bom_appl_count = 0
-if not BOM_LIVE_ACTIVE:
-    for code, allowed_cfgs in BOM_APPLICABILITY_OVERRIDES.items():
-        if code in bom:
-            bom[code]['configs'] = {k: 1 for k in allowed_cfgs}
-            bom_appl_count += 1
-            print(f"  BOM применяемость {code}: {sorted(allowed_cfgs)}")
-else:
-    print("  BOM применяемость: LIVE — используются правки из BOM_Детальный")
+for code, allowed_cfgs in BOM_APPLICABILITY_OVERRIDES.items():
+    if code in bom:
+        bom[code]['configs'] = {k: 1 for k in allowed_cfgs}
+        bom_appl_count += 1
+        print(f"  BOM применяемость {code}: {sorted(allowed_cfgs)}")
+if BOM_LIVE_ACTIVE:
+    print("  BOM применяемость: LIVE + принудительные overrides поверх BOM_Детальный")
 print(f"  Переопределено применяемостей BOM: {bom_appl_count}")
 
-# B02_2WD_elite: дополняем применяемость по правилам «все B02 / 2WD / Elite»
+# B02_2WD_elite: дополняем применяемость (кроме задних дорестайл-бамперов XST33/AST33)
 _b02_elite_added = 0
 for _code, _info in bom.items():
+    if _is_rear_prerestyle_bumper_code(_code):
+        continue
     _before = 'B02_2WD_elite' in _info.get('configs', {})
     _info['configs'] = apply_b02_2wd_elite_marks(_info.get('configs', {}), _code)
     if not _before and 'B02_2WD_elite' in _info.get('configs', {}):
         _b02_elite_added += 1
+# Повторно фиксируем overrides после B02_2WD_elite (LIVE BOM мог расширить применяемость)
+for code, allowed_cfgs in BOM_APPLICABILITY_OVERRIDES.items():
+    if code in bom:
+        bom[code]['configs'] = {k: 1 for k in allowed_cfgs}
 if _b02_elite_added:
     print(f"  B02_2WD_elite: добавлена применяемость для {_b02_elite_added} деталей")
 
@@ -1807,8 +1864,16 @@ for c in list(OBSOLETE_CODES):
     bom.pop(c, None); part_tab_map.pop(c, None); bumper_meta.pop(c, None)
 
 # Бамперы с цветовой раскраской — только вкладка AS_in_F_A (не AS_in_H_B по поставщику)
+_rear_bumper_appl = 0
 for _bcode in bumper_clr_map:
     CODE_TAB_OVERRIDES[_bcode] = 'AS_in_F_A'
+    if _is_rear_prerestyle_bumper_code(_bcode):
+        BOM_APPLICABILITY_OVERRIDES[_bcode] = {'B02_2WD_premium'}
+        if _bcode in bom:
+            bom[_bcode]['configs'] = {'B02_2WD_premium': 1}
+            _rear_bumper_appl += 1
+if _rear_bumper_appl:
+    print(f"  Задние дорестайл-бамперы: применяемость B02_2WD_premium → {_rear_bumper_appl} кодов")
 
 # ── Default упаковка для бамперов = 8 шт (если в BOM пусто или 1) ──
 DEFAULT_BUMPER_PKG = 8
@@ -1955,8 +2020,12 @@ def _detect_cols(df, hrow, base_cols):
                    if 'config' in str(v).lower()), None)
     cc_use = cc_det if cc_det is not None else base_cols['config'] + offset
 
-    # drive: колонка между model и config (применяем смещение)
-    dc_use = base_cols['drive'] + offset
+    dc_det = next((i for i, v in enumerate(h)
+                   if any(k in str(v).lower() for k in
+                          ('drive', '驱动', 'драйв', '4x2', '4x4', '两驱', '四驱'))), None)
+    dc_use = dc_det if dc_det is not None else base_cols['drive'] + offset
+    if dc_use == cc_use:
+        dc_use = base_cols['drive'] + offset
 
     # day1: ищем первый '1' после конфигурации (числовой заголовок дня)
     d1_det = None
@@ -2003,15 +2072,23 @@ for tab,cols in TAB_COLS.items():
         for i in range(hrow+1,end_row):
             row=df.iloc[i]
             if _bc>=len(row) or not pd.notna(row.iloc[_bc]): continue
-            bv=str(row.iloc[_bc]).strip()
+            bv = _normalize_batch_id(row.iloc[_bc])
             if not bv.startswith('R'): continue
             try:
                 mr=MODEL_MAP.get(str(row.iloc[_mc]).strip() if _mc<len(row) and pd.notna(row.iloc[_mc]) else '','')
                 dr=DRIVE_MAP.get(str(row.iloc[_dc]).strip() if _dc<len(row) and pd.notna(row.iloc[_dc]) else '','')
-                cr=CONFIG_MAP.get(str(row.iloc[_cc]).strip() if _cc<len(row) and pd.notna(row.iloc[_cc]) else '','')
+                cr=_map_plan_config(row.iloc[_cc] if _cc<len(row) else '')
                 tab_bi = batch_info_by_tab.setdefault(tab, {})
                 if bv not in tab_bi:
                     tab_bi[bv] = {'model': mr, 'drive': dr, 'config': cr, 'total': 0}
+                else:
+                    _bi = tab_bi[bv]
+                    if mr and not _bi.get('model'):
+                        _bi['model'] = mr
+                    if dr and not _bi.get('drive'):
+                        _bi['drive'] = dr
+                    if cr and not _bi.get('config'):
+                        _bi['config'] = cr
                 if bv not in batch_info:
                     batch_info[bv] = dict(tab_bi[bv])
             except:
@@ -2078,7 +2155,7 @@ if os.path.exists(PAINT_STATS):
         for row in ws_ps.iter_rows(min_row=3, values_only=True):
             batch = row[batch_col-1] if batch_col-1 < len(row) else None
             if not batch: continue
-            batch = str(batch).strip()
+            batch = _normalize_batch_id(batch)
             cd = {}
             for ci, k in col_to_key.items():
                 if ci-1 < len(row):
@@ -2204,39 +2281,16 @@ def cars_filter(month_num, models=None, configs=None, predicate=None, tabs=None)
                 out[day] = out.get(day, 0) + cars
     return out
 
-# ── Спец-правило для задних бамперов B02 XST33/AST33 (только дорестайл) ──
-# Дорестайл-партии — B02 2WD premium; рестайл — B02 4WD elite/Tech+
-PRERESTYLE_B02_CONFIGS = {'premium'}
-PRERESTYLE_B02_DRIVES  = {'2WD'}
-REAR_PRERESTYLE_BUMPER_PREFIXES = (
-    '2803130XST33', '2803130AST33', '2804105AST33', '2804105XST33',
-)
-
 def _get_batch_info(tab, bv):
-    """Метаданные партии с конкретной вкладки плана (без смешивания AS_in_F_A / AS_in_H_B)."""
-    bi = batch_info_by_tab.get(tab, {}).get(bv)
-    if bi:
-        return bi
-    return batch_info.get(bv, {})
+    """Метаданные партии только с указанной вкладки (без fallback на другие листы)."""
+    return batch_info_by_tab.get(tab, {}).get(_normalize_batch_id(bv), {})
 
 def _batch_color_lookup(bv):
-    """Цвета партии из paint stats; RAW2237 ↔ RAR2237."""
-    bv = str(bv).strip().upper()
-    if bv in batch_color:
-        return batch_color[bv]
-    if bv.startswith('RAW'):
-        alt = 'RAR' + bv[3:]
-        if alt in batch_color:
-            return batch_color[alt]
-    if bv.startswith('RAR'):
-        alt = 'RAW' + bv[3:]
-        if alt in batch_color:
-            return batch_color[alt]
-    return {}
+    """Цвета партии из paint stats — только точное совпадение номера (RAW ≠ RAR)."""
+    return batch_color.get(_normalize_batch_id(bv), {})
 
 def _is_rear_prerestyle_bumper(code):
-    return code in bumper_meta and any(
-        code.startswith(p) for p in REAR_PRERESTYLE_BUMPER_PREFIXES)
+    return code in bumper_meta and _is_rear_prerestyle_bumper_code(code)
 
 def _batch_is_prerestyle_b02(bi):
     return (bi.get('model') == 'B02'
@@ -2311,17 +2365,20 @@ def get_daily_demand(code, month_num):
     if code in bumper_meta:
         bm = bumper_meta[code]
         color_key = bm.get('color_key','')
-        applicable_b = bom.get(code, {}).get('configs', {})
-        if not isinstance(applicable_b, dict):
-            applicable_b = {k: 1 for k in applicable_b}
-        if code in bom and not applicable_b:
-            return {}
-        # Эвристика только для бамперов без строки в BOM
-        if not applicable_b and code not in bom:
-            if any(p in code for p in ('XKN61', 'KN260004', 'KN260005')):
-                applicable_b = {'B02_4WD_elite': 1, 'B02_4WD_TechPlus': 1}
-            elif any(p in code for p in ('XST33', 'AST33', 'AKN02')):
-                applicable_b = {'B02_2WD_premium': 1}
+        if _is_rear_prerestyle_bumper(code):
+            applicable_b = {'B02_2WD_premium': 1}
+        else:
+            applicable_b = bom.get(code, {}).get('configs', {})
+            if not isinstance(applicable_b, dict):
+                applicable_b = {k: 1 for k in applicable_b}
+            if code in bom and not applicable_b:
+                return {}
+            # Эвристика только для бамперов без строки в BOM
+            if not applicable_b and code not in bom:
+                if any(p in code for p in ('XKN61', 'KN260004', 'KN260005')):
+                    applicable_b = {'B02_4WD_elite': 1, 'B02_4WD_TechPlus': 1}
+                elif any(p in code for p in ('XST33', 'AST33', 'AKN02')):
+                    applicable_b = {'B02_2WD_premium': 1}
         if not applicable_b:
             return {}
         # ── Дедуплицируем партии только с вкладок из part_tab_map ──
@@ -2333,7 +2390,7 @@ def get_daily_demand(code, month_num):
                 if _is_rear_prerestyle_bumper(code) and not _batch_is_prerestyle_b02(bi):
                     continue
                 cfg_key = f"{bi.get('model','')}_{bi.get('drive','')}_{bi.get('config','')}"
-                matched, _ = cfg_match(cfg_key, applicable_b)
+                matched, _ = _bumper_cfg_match(code, cfg_key, applicable_b)
                 if not matched: continue
                 bc_split = _batch_color_lookup(bv)
                 if not bc_split: continue
@@ -2352,7 +2409,7 @@ def get_daily_demand(code, month_num):
             if _is_rear_prerestyle_bumper(code) and not _batch_is_prerestyle_b02(bi):
                 continue
             cfg_key = f"{bi.get('model','')}_{bi.get('drive','')}_{bi.get('config','')}"
-            matched, qty = cfg_match(cfg_key, applicable_b)
+            matched, qty = _bumper_cfg_match(code, cfg_key, applicable_b)
             if not matched: continue
             for day, cars in day_qty.items():
                 daily[day] = daily.get(day, 0) + cars * qty
@@ -2409,6 +2466,40 @@ print(f"  Parts with demand > 0: {with_demand} / {len(mrp_codes)}")
 for code in ['6803112XKN08A','ALAA005669','1101100AGW01A','2803104XKN61A8T']:
     t=sum(demand.get(code,{}).get(MONTHS[0][0],{}).values())
     print(f"  {code}: May={t:.1f}  tab={part_tab_map.get(code,'?')}")
+
+_REAR_BUMPER_DEBUG = ('2803130XST33A9C', '2804105AST33A9C')
+for _dbc in _REAR_BUMPER_DEBUG:
+    if _dbc not in demand:
+        continue
+    _cfgs = sorted(bom.get(_dbc, {}).get('configs', {}).keys())
+    print(f"  {_dbc}: tab={part_tab_map.get(_dbc)} BOM={_cfgs}")
+    for mnum, mlabel, _ in MONTHS:
+        _d6 = demand[_dbc].get(mnum, {}).get(6, 0)
+        if not _d6:
+            continue
+        _tabs = resolve_plan_tabs(part_tab_map.get(_dbc, ''))
+        _parts = []
+        for _tab in _tabs:
+            if _tab not in plan_batches or mnum not in plan_batches[_tab]:
+                continue
+            for _bv, _dq in plan_batches[_tab][mnum].items():
+                _cars6 = _dq.get(6, 0)
+                if _cars6 <= 0:
+                    continue
+                _bi = _get_batch_info(_tab, _bv)
+                if _is_rear_prerestyle_bumper(_dbc) and not _batch_is_prerestyle_b02(_bi):
+                    continue
+                _ck = f"{_bi.get('model','')}_{_bi.get('drive','')}_{_bi.get('config','')}"
+                _ok, _ = _bumper_cfg_match(_dbc, _ck, {'B02_2WD_premium': 1})
+                if not _ok:
+                    continue
+                _bc = _batch_color_lookup(_bv)
+                _clr = bumper_meta[_dbc].get('color_key', '')
+                _share = (_bc.get(_clr, 0) / sum(_bc.values())) if _bc and sum(_bc.values()) > 0 else 0
+                if _share <= 0:
+                    continue
+                _parts.append(f"{_tab}/{_bv}({_ck})×{_cars6}×{_share:.2f}")
+        print(f"    {mlabel} day6={_d6:.0f}  batches: {', '.join(_parts) if _parts else '— нет B02 2WD prem.'}")
 
 def get_info(code):
     if code in bom:
