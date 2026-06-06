@@ -1806,6 +1806,10 @@ all_codes = [c for c in all_codes if c not in OBSOLETE_CODES]
 for c in list(OBSOLETE_CODES):
     bom.pop(c, None); part_tab_map.pop(c, None); bumper_meta.pop(c, None)
 
+# Бамперы с цветовой раскраской — только вкладка AS_in_F_A (не AS_in_H_B по поставщику)
+for _bcode in bumper_clr_map:
+    CODE_TAB_OVERRIDES[_bcode] = 'AS_in_F_A'
+
 # ── Default упаковка для бамперов = 8 шт (если в BOM пусто или 1) ──
 DEFAULT_BUMPER_PKG = 8
 for code in list(bom.keys()):
@@ -1967,7 +1971,7 @@ def _detect_cols(df, hrow, base_cols):
 
     return bc_det if bc_det is not None else base_cols['batch'], mc_use, dc_use, cc_use, d1_use
 
-plan_batches={}; batch_info={}
+plan_batches={}; batch_info={}; batch_info_by_tab={}
 for tab,cols in TAB_COLS.items():
     try:
         df=pd.read_excel(PF_FILE,sheet_name=tab,header=None)
@@ -2005,11 +2009,17 @@ for tab,cols in TAB_COLS.items():
                 mr=MODEL_MAP.get(str(row.iloc[_mc]).strip() if _mc<len(row) and pd.notna(row.iloc[_mc]) else '','')
                 dr=DRIVE_MAP.get(str(row.iloc[_dc]).strip() if _dc<len(row) and pd.notna(row.iloc[_dc]) else '','')
                 cr=CONFIG_MAP.get(str(row.iloc[_cc]).strip() if _cc<len(row) and pd.notna(row.iloc[_cc]) else '','')
+                tab_bi = batch_info_by_tab.setdefault(tab, {})
+                if bv not in tab_bi:
+                    tab_bi[bv] = {'model': mr, 'drive': dr, 'config': cr, 'total': 0}
                 if bv not in batch_info:
-                    batch_info[bv]={'model':mr,'drive':dr,'config':cr,'total':0}
+                    batch_info[bv] = dict(tab_bi[bv])
             except:
+                tab_bi = batch_info_by_tab.setdefault(tab, {})
+                if bv not in tab_bi:
+                    tab_bi[bv] = {'model': '', 'drive': '', 'config': '', 'total': 0}
                 if bv not in batch_info:
-                    batch_info[bv]={'model':'','drive':'','config':'','total':0}
+                    batch_info[bv] = dict(tab_bi[bv])
             for d in range(1,n_days+1):
                 col_idx=_d1+d-1
                 if col_idx<len(row) and pd.notna(row.iloc[col_idx]):
@@ -2017,7 +2027,8 @@ for tab,cols in TAB_COLS.items():
                         q=float(row.iloc[col_idx])
                         if q>0:
                             month_data.setdefault(bv,{})[d]=month_data.get(bv,{}).get(d,0)+q
-                            batch_info[bv]['total']+=q
+                            batch_info_by_tab[tab][bv]['total'] += q
+                            batch_info[bv]['total'] += q
                     except: pass
         plan_batches[tab][mnum]=month_data
         n_cars=sum(sum(d.values()) for d in month_data.values())
@@ -2087,23 +2098,23 @@ else:
 
 # ═══ STEP 6: Demand (V7 logic) ════════════════════════════════
 def _unique_batches_for_tabs(month_num, tabs):
-    """Уникальные партии (R-номер) только с выбранных вкладок плана."""
+    """Уникальные (вкладка, партия) с выбранных листов — метаданные не смешиваются."""
     seen = set()
     out = []
     for tab in tabs:
         if tab not in plan_batches or month_num not in plan_batches[tab]:
             continue
         for bv, day_qty in plan_batches[tab][month_num].items():
-            if bv in seen:
+            key = (tab, bv)
+            if key in seen:
                 continue
-            seen.add(bv)
-            out.append((bv, day_qty))
+            seen.add(key)
+            out.append((tab, bv, day_qty))
     return out
 
 def cars_by_color(month_num, color_key, models=None, configs=None, applicable=None, tabs=None):
     """Возвращает {day: cars} — кузова данного цвета в данном месяце.
-    Дедуплицирует батчи по R-номеру (один батч может быть в нескольких tabs).
-    applicable — dict BOM-применяемости (фильтр по конфигурации партии).
+    Метаданные и цвета партии берутся с той же вкладки плана.
     tabs — вкладки Plan-Fact из part_tab_map; если None, берутся все вкладки.
     """
     out = {}
@@ -2114,9 +2125,11 @@ def cars_by_color(month_num, color_key, models=None, configs=None, applicable=No
             continue
         months_data = plan_batches[tab]
         for bv, day_qty in months_data[month_num].items():
-            if bv in seen: continue
-            seen.add(bv)
-            bi = batch_info.get(bv, {})
+            key = (tab, bv)
+            if key in seen:
+                continue
+            seen.add(key)
+            bi = _get_batch_info(tab, bv)
             b_model = bi.get('model','')
             b_config = bi.get('config','')
             if models and b_model not in models: continue
@@ -2126,7 +2139,7 @@ def cars_by_color(month_num, color_key, models=None, configs=None, applicable=No
                 matched, _ = cfg_match(cfg_key, applicable)
                 if not matched:
                     continue
-            bc_split = batch_color.get(bv, {})
+            bc_split = _batch_color_lookup(bv)
             if not bc_split: continue
             total_in_batch = sum(bc_split.values())
             if total_in_batch <= 0: continue
@@ -2183,7 +2196,7 @@ def cars_filter(month_num, models=None, configs=None, predicate=None, tabs=None)
             continue
         months_data = plan_batches[tab]
         for bv, day_qty in months_data[month_num].items():
-            bi = batch_info.get(bv, {})
+            bi = _get_batch_info(tab, bv)
             if models and bi.get('model','') not in models: continue
             if configs and bi.get('config','') not in configs: continue
             if predicate and not predicate(bv, bi): continue
@@ -2191,10 +2204,44 @@ def cars_filter(month_num, models=None, configs=None, predicate=None, tabs=None)
                 out[day] = out.get(day, 0) + cars
     return out
 
-# ── Спец-правило для задних бамперов B02 XST33 (только дорестайл) ──
-# Дорестайл-партии — это B02 2WD premium (CC6480AL00C); рестайл — B02 4WD elite/Tech+
-PRERESTYLE_B02_CONFIGS = {'premium'}   # пока: только premium 2WD = pre-restyle
+# ── Спец-правило для задних бамперов B02 XST33/AST33 (только дорестайл) ──
+# Дорестайл-партии — B02 2WD premium; рестайл — B02 4WD elite/Tech+
+PRERESTYLE_B02_CONFIGS = {'premium'}
 PRERESTYLE_B02_DRIVES  = {'2WD'}
+REAR_PRERESTYLE_BUMPER_PREFIXES = (
+    '2803130XST33', '2803130AST33', '2804105AST33', '2804105XST33',
+)
+
+def _get_batch_info(tab, bv):
+    """Метаданные партии с конкретной вкладки плана (без смешивания AS_in_F_A / AS_in_H_B)."""
+    bi = batch_info_by_tab.get(tab, {}).get(bv)
+    if bi:
+        return bi
+    return batch_info.get(bv, {})
+
+def _batch_color_lookup(bv):
+    """Цвета партии из paint stats; RAW2237 ↔ RAR2237."""
+    bv = str(bv).strip().upper()
+    if bv in batch_color:
+        return batch_color[bv]
+    if bv.startswith('RAW'):
+        alt = 'RAR' + bv[3:]
+        if alt in batch_color:
+            return batch_color[alt]
+    if bv.startswith('RAR'):
+        alt = 'RAW' + bv[3:]
+        if alt in batch_color:
+            return batch_color[alt]
+    return {}
+
+def _is_rear_prerestyle_bumper(code):
+    return code in bumper_meta and any(
+        code.startswith(p) for p in REAR_PRERESTYLE_BUMPER_PREFIXES)
+
+def _batch_is_prerestyle_b02(bi):
+    return (bi.get('model') == 'B02'
+            and bi.get('drive') in PRERESTYLE_B02_DRIVES
+            and bi.get('config') in PRERESTYLE_B02_CONFIGS)
 
 # (HEADREST_X2_CODES, OBSOLETE_CODES, CFG_FUZZY_ALT, cfg_match определены в начале файла)
 
@@ -2205,7 +2252,7 @@ def get_daily_demand_raw_bumper(code, month_num, b_models, tabs):
     for tab in tabs:
         if tab not in plan_batches or month_num not in plan_batches[tab]: continue
         for bv,day_qty in plan_batches[tab][month_num].items():
-            if b_models and batch_info.get(bv,{}).get('model','') not in b_models: continue
+            if b_models and _get_batch_info(tab, bv).get('model','') not in b_models: continue
             for day,cars in day_qty.items():
                 d[day]=d.get(day,0)+cars
     return d
@@ -2239,7 +2286,7 @@ def get_daily_demand(code, month_num):
         for tab in tabs:
             if tab not in plan_batches or month_num not in plan_batches[tab]: continue
             for bv,day_qty in plan_batches[tab][month_num].items():
-                bi=batch_info.get(bv,{})
+                bi = _get_batch_info(tab, bv)
                 norm=norms.get(bi.get('model',''),0)
                 if norm==0: continue
                 for day,cars in day_qty.items():
@@ -2281,12 +2328,14 @@ def get_daily_demand(code, month_num):
         unique_batches = _unique_batches_for_tabs(month_num, tabs)
         # Если есть цветовая раскраска — split по цветам
         if color_key and batch_color:
-            for bv, day_qty in unique_batches:
-                bi = batch_info.get(bv, {})
+            for tab, bv, day_qty in unique_batches:
+                bi = _get_batch_info(tab, bv)
+                if _is_rear_prerestyle_bumper(code) and not _batch_is_prerestyle_b02(bi):
+                    continue
                 cfg_key = f"{bi.get('model','')}_{bi.get('drive','')}_{bi.get('config','')}"
                 matched, _ = cfg_match(cfg_key, applicable_b)
                 if not matched: continue
-                bc_split = batch_color.get(bv, {})
+                bc_split = _batch_color_lookup(bv)
                 if not bc_split: continue
                 total_in_batch = sum(bc_split.values())
                 if total_in_batch <= 0: continue
@@ -2298,8 +2347,10 @@ def get_daily_demand(code, month_num):
             # Бампера — целые единицы (округляем итог по дням)
             return {d: round(v) for d, v in daily.items()}
         # fallback: все кузова из applicable_b (без цветовой раскраски)
-        for bv, day_qty in unique_batches:
-            bi = batch_info.get(bv, {})
+        for tab, bv, day_qty in unique_batches:
+            bi = _get_batch_info(tab, bv)
+            if _is_rear_prerestyle_bumper(code) and not _batch_is_prerestyle_b02(bi):
+                continue
             cfg_key = f"{bi.get('model','')}_{bi.get('drive','')}_{bi.get('config','')}"
             matched, qty = cfg_match(cfg_key, applicable_b)
             if not matched: continue
@@ -2320,7 +2371,7 @@ def get_daily_demand(code, month_num):
     for tab in tabs:
         if tab not in plan_batches or month_num not in plan_batches[tab]: continue
         for bv,day_qty in plan_batches[tab][month_num].items():
-            bi=batch_info.get(bv,{})
+            bi = _get_batch_info(tab, bv)
             b_model=bi.get('model',''); b_drive=bi.get('drive',''); b_config=bi.get('config','')
             qty_per_car = 1  # default: 1 unit per car
             if is_b16:
@@ -2940,7 +2991,7 @@ def _chem_cars(code, month_num, fut_only=False):
     for tab in tabs:
         if tab not in plan_batches or month_num not in plan_batches[tab]: continue
         for bv, day_qty in plan_batches[tab][month_num].items():
-            bi = batch_info.get(bv, {})
+            bi = _get_batch_info(tab, bv)
             if bi.get('model', '') not in applicable_models: continue
             for day, cars in day_qty.items():
                 if fut_only and month_num == STOCK_AS_OF_MONTH and day <= STOCK_AS_OF_DAY: continue
