@@ -2026,15 +2026,33 @@ else:
     print(f"  ⚠️  Файл не найден: {PAINT_STATS}")
 
 # ═══ STEP 6: Demand (V7 logic) ════════════════════════════════
-def cars_by_color(month_num, color_key, models=None, configs=None, applicable=None):
+def _unique_batches_for_tabs(month_num, tabs):
+    """Уникальные партии (R-номер) только с выбранных вкладок плана."""
+    seen = set()
+    out = []
+    for tab in tabs:
+        if tab not in plan_batches or month_num not in plan_batches[tab]:
+            continue
+        for bv, day_qty in plan_batches[tab][month_num].items():
+            if bv in seen:
+                continue
+            seen.add(bv)
+            out.append((bv, day_qty))
+    return out
+
+def cars_by_color(month_num, color_key, models=None, configs=None, applicable=None, tabs=None):
     """Возвращает {day: cars} — кузова данного цвета в данном месяце.
     Дедуплицирует батчи по R-номеру (один батч может быть в нескольких tabs).
     applicable — dict BOM-применяемости (фильтр по конфигурации партии).
+    tabs — вкладки Plan-Fact из part_tab_map; если None, берутся все вкладки.
     """
     out = {}
     seen = set()
-    for tab, months_data in plan_batches.items():
-        if month_num not in months_data: continue
+    tab_list = tabs if tabs is not None else list(plan_batches.keys())
+    for tab in tab_list:
+        if tab not in plan_batches or month_num not in plan_batches[tab]:
+            continue
+        months_data = plan_batches[tab]
         for bv, day_qty in months_data[month_num].items():
             if bv in seen: continue
             seen.add(bv)
@@ -2060,7 +2078,7 @@ def cars_by_color(month_num, color_key, models=None, configs=None, applicable=No
     return out
 
 
-def _primer_demand_for_paints(primer_code, month_num, paint_codes):
+def _primer_demand_for_paints(primer_code, month_num, paint_codes, tabs=None):
     """Σ(кузова цветов paint_codes × BOM краски) × норма грунта primer_code."""
     norms = chem_norms.get(primer_code, {})
     if not norms or not paint_codes:
@@ -2076,31 +2094,34 @@ def _primer_demand_for_paints(primer_code, month_num, paint_codes):
                 if norm <= 0:
                     continue
                 cars_d = cars_by_color(
-                    month_num, color_key, models={model_key}, applicable=applicable)
+                    month_num, color_key, models={model_key}, applicable=applicable, tabs=tabs)
                 for day, cars in cars_d.items():
                     daily[day] = daily.get(day, 0) + cars * norm
     return daily
 
 
-def get_primer_demand(primer_code, month_num):
+def get_primer_demand(primer_code, month_num, tabs=None):
     """YIERTE-грунт: все связанные краски минус перешедшие на Litum. Litum-грунт: одна краска."""
     sp_litum = _primer_split_for_litum(primer_code)
     if sp_litum:
         if month_num < sp_litum['from_month']:
             return {}
         return _primer_demand_for_paints(
-            primer_code, month_num, [sp_litum['paint_new']])
+            primer_code, month_num, [sp_litum['paint_new']], tabs=tabs)
     if primer_code not in PRIMER_LINKED_PAINTS:
         return {}
     linked = [p for p in PRIMER_LINKED_PAINTS[primer_code]
               if p not in _primer_excluded_paints(primer_code, month_num)]
-    return _primer_demand_for_paints(primer_code, month_num, linked)
+    return _primer_demand_for_paints(primer_code, month_num, linked, tabs=tabs)
 
-def cars_filter(month_num, models=None, configs=None, predicate=None):
+def cars_filter(month_num, models=None, configs=None, predicate=None, tabs=None):
     """Возвращает {day: cars} с произвольным фильтром по партиям."""
     out = {}
-    for tab, months_data in plan_batches.items():
-        if month_num not in months_data: continue
+    tab_list = tabs if tabs is not None else list(plan_batches.keys())
+    for tab in tab_list:
+        if tab not in plan_batches or month_num not in plan_batches[tab]:
+            continue
+        months_data = plan_batches[tab]
         for bv, day_qty in months_data[month_num].items():
             bi = batch_info.get(bv, {})
             if models and bi.get('model','') not in models: continue
@@ -2141,7 +2162,7 @@ def get_daily_demand(code, month_num):
     if code in chem_norms:
         # ─ Грунты: цвета и применяемость от связанных красок ─
         if code in PRIMER_LINKED_PAINTS:
-            return get_primer_demand(code, month_num)
+            return get_primer_demand(code, month_num, tabs=tabs)
         norms=chem_norms[code]
         color_filter=paint_colors.get(code,False)
         # ─ Цветная краска: norm × кузова нужного(их) цвета(ов) ─
@@ -2150,7 +2171,7 @@ def get_daily_demand(code, month_num):
                 # для каждого цвета — соберём кузова по моделям с подходящей нормой
                 for model_key, norm in norms.items():
                     if norm <= 0: continue
-                    cars_d = cars_by_color(month_num, color_key, models={model_key})
+                    cars_d = cars_by_color(month_num, color_key, models={model_key}, tabs=tabs)
                     for day, cars in cars_d.items():
                         daily[day] = daily.get(day, 0) + cars * norm
             return daily
@@ -2171,7 +2192,7 @@ def get_daily_demand(code, month_num):
     if code in color_filtered_paints and code not in chem_norms:
         color_keys = paint_colors.get(code, []) or []
         for color_key in color_keys:
-            cars_d = cars_by_color(month_num, color_key)
+            cars_d = cars_by_color(month_num, color_key, tabs=tabs)
             for day, cars in cars_d.items():
                 daily[day] = daily.get(day, 0) + cars * PAINT_FALLBACK_NORM
         # fallback: если paint stats нет — берём V7
@@ -2196,15 +2217,8 @@ def get_daily_demand(code, month_num):
                 applicable_b = {'B02_2WD_premium': 1}
         if not applicable_b:
             return {}
-        # ── Дедуплицируем партии: одна и та же партия R-номер встречается в ≥1 tab ──
-        seen_batches = set()
-        unique_batches = []   # list of (bv, day_qty)
-        for tab, months_data in plan_batches.items():
-            if month_num not in months_data: continue
-            for bv, day_qty in months_data[month_num].items():
-                if bv in seen_batches: continue
-                seen_batches.add(bv)
-                unique_batches.append((bv, day_qty))
+        # ── Дедуплицируем партии только с вкладок из part_tab_map ──
+        unique_batches = _unique_batches_for_tabs(month_num, tabs)
         # Если есть цветовая раскраска — split по цветам
         if color_key and batch_color:
             for bv, day_qty in unique_batches:
