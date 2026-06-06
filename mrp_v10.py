@@ -2485,9 +2485,9 @@ def _graph_stock_formula(ri, prev_col_l, prev_col_n, pkg, fallback):
     )
 
 def _delivery_series_demand(code):
-    _code_sdate = get_stock_date(code)
+    """Спрос для графика поставок — как на вкладке Потребность (все дни с потребностью)."""
     return [
-        round(demand[code].get(mn, {}).get(d, 0), 4) if dt > _code_sdate else 0.0
+        round(demand[code].get(mn, {}).get(d, 0), 4)
         for (dt, mn, d) in all_dates
     ]
 
@@ -3594,25 +3594,20 @@ def _risk_avg_daily(code):
 
 
 def _risk_balance_series(code):
-    """Дневной баланс по графику поставок; стартовый остаток — фактический (в т.ч. ручной)."""
-    _code_sdate = get_stock_date(code)
+    """Дневной баланс по графику поставок (все дни с потребностью в горизонте)."""
     pairs = DELIVERY_SCHEDULES.get(code, {}).get('pairs', {})
     stk0 = float(stock.get(code, 0) or 0)
     series = []
     for di, (dt, mnum, d) in enumerate(all_dates):
-        if dt <= _code_sdate:
-            series.append({'dt': dt, 'mn': mnum, 'd': d, 'bal': stk0, 'del': 0.0})
-        else:
-            del_d, bal = pairs.get(di, (0.0, stk0))
-            series.append({'dt': dt, 'mn': mnum, 'd': d, 'bal': bal, 'del': del_d})
+        del_d, bal = pairs.get(di, (0.0, stk0))
+        series.append({'dt': dt, 'mn': mnum, 'd': d, 'bal': bal, 'del': del_d})
     return series
 
 
 def _risk_simulation(code):
     """Дефицит по симуляции графика; справочно — ближайшие поставки и дата закрытия."""
-    _code_sdate = get_stock_date(code)
     series = _risk_balance_series(code)
-    upcoming = [(s['dt'], s['del']) for s in series if s['dt'] > _code_sdate and s['del'] > 0]
+    upcoming = [(s['dt'], s['del']) for s in series if s['del'] > 0]
 
     first_def = None
     min_bal = float(stock.get(code, 0) or 0)
@@ -3620,8 +3615,6 @@ def _risk_simulation(code):
     in_def = False
 
     for s in series:
-        if s['dt'] <= _code_sdate:
-            continue
         if s['bal'] < min_bal:
             min_bal = s['bal']
         if s['bal'] < 0:
