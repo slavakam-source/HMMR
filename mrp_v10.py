@@ -2381,12 +2381,15 @@ def _prerestyle_bumper_applicable():
 
 
 def _bumper_batch_cfg_key(bi, code=''):
-    """Ключ конфигурации партии; для дорестайл B02 premium принудительно 2WD."""
+    """Ключ конфигурации партии.
+    Для дорестайл B02 premium принимаем 2WD ТОЛЬКО если привод в плане не указан
+    (пустой). Если привод задан (4x4 → 4WD), уважаем его, иначе B02 4WD premium
+    ошибочно матчился бы как 2WD premium и завышал потребность бампера."""
     model = bi.get('model', '') or ''
     drive = bi.get('drive', '') or ''
     config = bi.get('config', '') or ''
     if code and _is_prerestyle_bumper_code(code):
-        if model == 'B02' and config in PRERESTYLE_B02_CONFIGS:
+        if model == 'B02' and config in PRERESTYLE_B02_CONFIGS and not drive:
             drive = '2WD'
     return f"{model}_{drive}_{config}"
 

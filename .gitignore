@@ -1,0 +1,6 @@
+
+# local data files (provided for debugging, tracked on main)
+2026_Plan-Fact*.xlsx
+Order_calculation_statistics*.xlsx
+MRP_System_v9*.xlsx
+__pycache__/
