@@ -46,6 +46,37 @@ def _resolve_excel_path(path):
     real_path = os.path.join(os.path.dirname(path), real_name)
     return real_path if os.path.isfile(real_path) else path
 
+def _save_workbook_safe(wb, target_path, label='результат MRP'):
+    """Сохраняет workbook; если файл открыт в Excel — пробует альтернативное имя."""
+    base, ext = os.path.splitext(target_path)
+    folder = os.path.dirname(target_path) or ROOT
+    ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    candidates = [
+        target_path,
+        os.path.join(folder, f"MRP_System_v9_new{ext}"),
+        os.path.join(folder, f"MRP_System_v9_{ts}{ext}"),
+    ]
+    last_err = None
+    for path in candidates:
+        try:
+            wb.save(path)
+            if os.path.normcase(path) != os.path.normcase(target_path):
+                print(f"\n  ⚠️  {os.path.basename(target_path)} открыт в Excel — сохранено как:")
+                print(f"       {path}")
+            return path
+        except PermissionError as e:
+            last_err = e
+            print(f"  ⚠️  Нет доступа к «{os.path.basename(path)}» — закройте файл в Excel")
+        except OSError as e:
+            if getattr(e, 'errno', None) == 13:
+                last_err = e
+                print(f"  ⚠️  Нет доступа к «{os.path.basename(path)}» — закройте файл в Excel")
+            else:
+                raise
+    print(f"\n  ❌ Не удалось сохранить {label}.")
+    print("     Закройте MRP_System_v9.xlsx (и Excel полностью, если нужно) и запустите скрипт снова.")
+    raise last_err
+
 def _latest(folder, *patterns):
     """Возвращает самый свежий файл среди всех паттернов, или None."""
     candidates = []
@@ -2203,6 +2234,68 @@ demand_mismatches = []
 
 def _normalize_part_code(code):
     return re.sub(r'\s+', '', str(code or '').strip()).upper()
+
+_PART_CODE_RE = re.compile(
+    r'^(?:AL[A-Z]{2}\d{4,}|\d{7,}[A-Z0-9]{2,}|[A-Z]{2}\d{5,}[A-Z0-9]*)$',
+    re.IGNORECASE)
+
+def _ref_looks_like_part_code(val):
+    c = _normalize_part_code(val)
+    if len(c) < 8:
+        return False
+    if _PART_CODE_RE.match(c):
+        return True
+    if re.match(r'^\d{7,}[A-Z]', c):
+        return True
+    if re.match(r'^AL[A-Z]{2}\d', c, re.I):
+        return True
+    return False
+
+def _ref_cell_str(val):
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return ''
+    if isinstance(val, (datetime.datetime, datetime.date)):
+        return val.strftime('%d.%m.%Y')
+    return str(val).strip()
+
+def _ref_header_keywords():
+    return ('код', 'code', 'артикул', 'деталь', 'part', 'номер', 'sku', 'material', 'материал')
+
+def _ref_is_qty_avoid_header(hs):
+    return any(x in hs for x in (
+        'mrp', 'расчёт', 'расчет', 'посчит', 'систем', 'ошибка', 'разниц', 'delta',
+        'коммент', 'примеч', 'наимен', 'поставщ', 'ед.', 'ед ', 'вкладк', 'остаток',
+        'дефицит', 'тип', 'норма'))
+
+def _ref_is_ref_qty_header(hs):
+    if _ref_is_qty_avoid_header(hs):
+        return False
+    return any(x in hs for x in (
+        'эталон', 'реальн', 'факт', 'правильн', 'должн', 'верно', 'нужн', 'ожида',
+        'склад', 'план', 'истин'))
+
+def _ref_parse_date_from_text(text):
+    s = str(text or '').strip()
+    if not s:
+        return None, None
+    if isinstance(text, (datetime.datetime, datetime.date)):
+        return text.month, text.day
+    if hasattr(text, 'month') and hasattr(text, 'day'):
+        try:
+            return int(text.month), int(text.day)
+        except (TypeError, ValueError):
+            pass
+    m = re.search(r'(\d{1,2})[./](\d{1,2})[./](\d{2,4})', s)
+    if m:
+        return int(m.group(2)), int(m.group(1))
+    m = re.search(r'(\d{1,2})[./](\d{1,2})(?:\D|$)', s)
+    if m:
+        day, month = int(m.group(1)), int(m.group(2))
+        if 1 <= month <= 12 and 1 <= day <= 31:
+            for mnum, _, _ in MONTHS:
+                if mnum == month:
+                    return mnum, day
+    return None, None
 
 def _ref_parse_qty(val):
     if val is None or (isinstance(val, float) and pd.isna(val)):
@@ -4588,8 +4681,8 @@ for ri, row_data in enumerate(CFG_DATA, 3):
 print(f"    Конфигурации: {len(CFG_DATA)} конфигураций")
 
 # ═══ Сохраняем ═══════════════════════════════════════════════
-wb_out.save(OUT)
-print(f"\n✅ Готово! Файл сохранён: {OUT}")
+OUT_SAVED = _save_workbook_safe(wb_out, OUT)
+print(f"\n✅ Готово! Файл сохранён: {OUT_SAVED}")
 print(f"   Расчётный период: {PERIOD_LABEL}")
 print(f"   Листы: {[s.title for s in wb_out.worksheets]}")
 
