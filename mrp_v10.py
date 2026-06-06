@@ -404,7 +404,7 @@ def _map_plan_config(value):
             return v
     if 'tech' in sl and 'plus' in sl:
         return 'TechPlus'
-    if 'premium' in sl or '高配' in s:
+    if 'premium' in sl or '高配' in s or '中高配' in s:
         return 'premium'
     if 'elite' in sl or '中配' in s:
         return 'elite'
@@ -536,7 +536,9 @@ MODEL_MAP={'New A01':'A01','New A08':'A08','New B02':'B02','New B04':'B04',
            'B02':'B02','B04':'B04','B06':'B06','B06X':'B06','B16':'B16'}
 DRIVE_MAP={'4x2':'2WD','4x4':'4WD','4X2':'2WD','4X4':'4WD',
            '6MT两驱':'2WD','两驱':'2WD','四驱':'4WD','6MT 4x2':'2WD',
-           '4x2':'2WD','4x4':'4WD'}
+           '4x2':'2WD','4x4':'4WD',
+           '2WD':'2WD','4WD':'4WD','FWD':'2WD','AWD':'4WD',
+           '前驱':'2WD','后驱':'4WD','前轮驱动':'2WD','四轮驱动':'4WD'}
 CONFIG_MAP={'comfort低配':'comfort','elite中配':'elite','Elite低配':'elite',
             'elite超低配':'elite','premium高配':'premium','Premium中配':'premium',
             'Premium中高配':'premium','Premium':'premium','Premium低配':'premium',
@@ -1697,7 +1699,7 @@ if BOM_LIVE_ACTIVE:
     print("  BOM применяемость: LIVE + принудительные overrides поверх BOM_Детальный")
 print(f"  Переопределено применяемостей BOM: {bom_appl_count}")
 
-# B02_2WD_elite: дополняем применяемость (кроме задних дорестайл-бамперов XST33/AST33)
+# B02_2WD_elite: дополняем применяемость (кроме дорестайл-бамперов XST33/AST33)
 _b02_elite_added = 0
 for _code, _info in bom.items():
     if _is_prerestyle_bumper_code(_code):
@@ -2289,8 +2291,17 @@ def _get_batch_info(tab, bv):
     return batch_info_by_tab.get(tab, {}).get(_normalize_batch_id(bv), {})
 
 def _batch_color_lookup(bv):
-    """Цвета партии из paint stats — только точное совпадение номера (RAW ≠ RAR)."""
-    return batch_color.get(_normalize_batch_id(bv), {})
+    """Цвета партии из paint stats. RAW ≠ RAR; при единственном совпадении по хвосту номера — fallback."""
+    bv = _normalize_batch_id(bv)
+    if bv in batch_color:
+        return batch_color[bv]
+    tail = re.sub(r'^[A-Z]+', '', bv)
+    if not tail:
+        return {}
+    matches = [k for k in batch_color if re.sub(r'^[A-Z]+', '', k) == tail]
+    if len(matches) == 1:
+        return batch_color[matches[0]]
+    return {}
 
 def _is_prerestyle_bumper(code):
     return code in bumper_meta and _is_prerestyle_bumper_code(code)
@@ -2299,10 +2310,37 @@ def _is_prerestyle_bumper(code):
 def _prerestyle_bumper_applicable():
     return {'B02_2WD_premium': 1}
 
-def _batch_is_prerestyle_b02(bi):
-    return (bi.get('model') == 'B02'
-            and bi.get('drive') in PRERESTYLE_B02_DRIVES
-            and bi.get('config') in PRERESTYLE_B02_CONFIGS)
+
+def _bumper_batch_cfg_key(bi, code=''):
+    """Ключ конфигурации партии; для дорестайл B02 premium принудительно 2WD."""
+    model = bi.get('model', '') or ''
+    drive = bi.get('drive', '') or ''
+    config = bi.get('config', '') or ''
+    if code and _is_prerestyle_bumper_code(code):
+        if model == 'B02' and config in PRERESTYLE_B02_CONFIGS:
+            drive = '2WD'
+    return f"{model}_{drive}_{config}"
+
+
+def _bumper_color_share(bv, color_key):
+    """Доля color_key в партии; 0.0 если цвета нет, None если paint stats для партии нет."""
+    bc_split = _batch_color_lookup(bv)
+    if not bc_split:
+        return None
+    total_in_batch = sum(bc_split.values())
+    if total_in_batch <= 0:
+        return None
+    color_cars = bc_split.get(color_key, 0)
+    if color_cars <= 0:
+        return 0.0
+    return color_cars / total_in_batch
+
+
+def _bumper_add_batch_demand(daily, day_qty, share):
+    if share is None or share <= 0:
+        return
+    for day, cars in day_qty.items():
+        daily[day] = daily.get(day, 0) + cars * share
 
 # (HEADREST_X2_CODES, OBSOLETE_CODES, CFG_FUZZY_ALT, cfg_match определены в начале файла)
 
@@ -2390,37 +2428,21 @@ def get_daily_demand(code, month_num):
             return {}
         # ── Дедуплицируем партии только с вкладок из part_tab_map ──
         unique_batches = _unique_batches_for_tabs(month_num, tabs)
-        # Если есть цветовая раскраска — split по цветам
-        if color_key and batch_color:
-            for tab, bv, day_qty in unique_batches:
-                bi = _get_batch_info(tab, bv)
-                if _is_prerestyle_bumper(code) and not _batch_is_prerestyle_b02(bi):
-                    continue
-                cfg_key = f"{bi.get('model','')}_{bi.get('drive','')}_{bi.get('config','')}"
-                matched, _ = _bumper_cfg_match(code, cfg_key, applicable_b)
-                if not matched: continue
-                bc_split = _batch_color_lookup(bv)
-                if not bc_split: continue
-                total_in_batch = sum(bc_split.values())
-                if total_in_batch <= 0: continue
-                color_cars = bc_split.get(color_key, 0)
-                if color_cars <= 0: continue
-                share = color_cars / total_in_batch
-                for day, cars in day_qty.items():
-                    daily[day] = daily.get(day, 0) + cars * share
-            # Бампера — целые единицы (округляем итог по дням)
-            return {d: round(v) for d, v in daily.items()}
-        # fallback: все кузова из applicable_b (без цветовой раскраски)
+        use_color_split = bool(color_key and batch_color)
         for tab, bv, day_qty in unique_batches:
             bi = _get_batch_info(tab, bv)
-            if _is_prerestyle_bumper(code) and not _batch_is_prerestyle_b02(bi):
-                continue
-            cfg_key = f"{bi.get('model','')}_{bi.get('drive','')}_{bi.get('config','')}"
+            cfg_key = _bumper_batch_cfg_key(bi, code)
             matched, qty = _bumper_cfg_match(code, cfg_key, applicable_b)
-            if not matched: continue
-            for day, cars in day_qty.items():
-                daily[day] = daily.get(day, 0) + cars * qty
-        return {d: round(v) for d, v in daily.items()}
+            if not matched:
+                continue
+            if use_color_split:
+                share = _bumper_color_share(bv, color_key)
+                if share is None or share <= 0:
+                    continue
+                _bumper_add_batch_demand(daily, day_qty, share * qty)
+            else:
+                _bumper_add_batch_demand(daily, day_qty, qty)
+        return {d: max(0, int(round(v))) for d, v in daily.items() if round(v) > 0}
 
     # 3. BOM general
     is_b16 = (code in B16_ELITE)
@@ -2474,22 +2496,14 @@ for code in ['6803112XKN08A','ALAA005669','1101100AGW01A','2803104XKN61A8T']:
     t=sum(demand.get(code,{}).get(MONTHS[0][0],{}).values())
     print(f"  {code}: May={t:.1f}  tab={part_tab_map.get(code,'?')}")
 
-_PRERESTYLE_BUMPER_DEBUG = (
-    '2803120XST33A8T', '2804104AST33A8T',
-    '2803120XST33A9C', '2804104AST33A9C',
-    '2803120XST33AC3', '2804104AST33AC3',
-    '2803130XST33A9C', '2804105AST33A9C',
-)
-for _dbc in _PRERESTYLE_BUMPER_DEBUG:
-    if _dbc not in demand:
-        continue
-    _cfgs = sorted(bom.get(_dbc, {}).get('configs', {}).keys())
-    print(f"  {_dbc}: tab={part_tab_map.get(_dbc)} BOM={_cfgs}")
+def _debug_bumper_day6(code):
+    if code not in demand:
+        return
+    _cfgs = sorted(bom.get(code, {}).get('configs', {}).keys())
+    print(f"  {code}: tab={part_tab_map.get(code)} BOM={_cfgs}")
     for mnum, mlabel, _ in MONTHS:
-        _d6 = demand[_dbc].get(mnum, {}).get(6, 0)
-        if not _d6:
-            continue
-        _tabs = resolve_plan_tabs(part_tab_map.get(_dbc, ''))
+        _d6 = demand[code].get(mnum, {}).get(6, 0)
+        _tabs = resolve_plan_tabs(part_tab_map.get(code, ''))
         _parts = []
         for _tab in _tabs:
             if _tab not in plan_batches or mnum not in plan_batches[_tab]:
@@ -2499,19 +2513,56 @@ for _dbc in _PRERESTYLE_BUMPER_DEBUG:
                 if _cars6 <= 0:
                     continue
                 _bi = _get_batch_info(_tab, _bv)
-                if _is_prerestyle_bumper(_dbc) and not _batch_is_prerestyle_b02(_bi):
-                    continue
-                _ck = f"{_bi.get('model','')}_{_bi.get('drive','')}_{_bi.get('config','')}"
-                _ok, _ = _bumper_cfg_match(_dbc, _ck, {'B02_2WD_premium': 1})
+                _ck = _bumper_batch_cfg_key(_bi, code)
+                _ok, _ = _bumper_cfg_match(code, _ck, _prerestyle_bumper_applicable()
+                                           if _is_prerestyle_bumper_code(code)
+                                           else bom.get(code, {}).get('configs', {}))
                 if not _ok:
                     continue
-                _bc = _batch_color_lookup(_bv)
-                _clr = bumper_meta[_dbc].get('color_key', '')
-                _share = (_bc.get(_clr, 0) / sum(_bc.values())) if _bc and sum(_bc.values()) > 0 else 0
-                if _share <= 0:
+                _clr = bumper_meta.get(code, {}).get('color_key', '')
+                _share = _bumper_color_share(_bv, _clr)
+                if _share is None:
+                    _parts.append(f"{_tab}/{_bv}({_ck})×{_cars6}×no_paint")
+                elif _share <= 0:
                     continue
-                _parts.append(f"{_tab}/{_bv}({_ck})×{_cars6}×{_share:.2f}")
-        print(f"    {mlabel} day6={_d6:.0f}  batches: {', '.join(_parts) if _parts else '— нет B02 2WD prem.'}")
+                else:
+                    _parts.append(f"{_tab}/{_bv}({_ck})×{_cars6}×{_share:.2f}")
+        print(f"    {mlabel} day6={_d6:.0f}  batches: {', '.join(_parts) if _parts else '—'}")
+
+
+_PRERESTYLE_BUMPER_DEBUG = (
+    '2803120XST33A8T', '2804104AST33A8T',
+    '2803120XST33A9C', '2804104AST33A9C',
+    '2803120XST33AC3', '2804104AST33AC3',
+    '2803130XST33A9C', '2804105AST33A9C',
+)
+for _dbc in _PRERESTYLE_BUMPER_DEBUG:
+    _debug_bumper_day6(_dbc)
+
+# Сводка потребности по поставщикам (все месяцы расчёта, day-6 отдельно)
+print("  Потребность по поставщикам:")
+for _supp_key in sorted(set(normalize_supplier(bom.get(c, {}).get('supplier', ''))
+                            for c in mrp_codes)):
+    if not _supp_key:
+        continue
+    _parts = 0
+    _month_totals = []
+    _day6_total = 0.0
+    for _c in mrp_codes:
+        if normalize_supplier(bom.get(_c, {}).get('supplier', '')) != _supp_key:
+            continue
+        if any(demand[_c].get(_mn) for _mn, _, _ in MONTHS):
+            _parts += 1
+        for _mn, _ml, _ in MONTHS:
+            _mt = sum(demand[_c].get(_mn, {}).values())
+            if _mn == 6 or _ml.lower().startswith('jun'):
+                _day6_total += demand[_c].get(_mn, {}).get(6, 0)
+    for _mn, _ml, _ in MONTHS:
+        _mt = sum(sum(demand[_c].get(_mn, {}).values())
+                  for _c in mrp_codes
+                  if normalize_supplier(bom.get(_c, {}).get('supplier', '')) == _supp_key)
+        _month_totals.append(f"{_ml[:3]}={_mt:.0f}")
+    print(f"    {_supp_key}: {_parts} поз. | {', '.join(_month_totals)} | day6={_day6_total:.0f}")
 
 def get_info(code):
     if code in bom:
