@@ -2582,11 +2582,12 @@ def _cap_smc_day_deliveries(raw_qty):
         out[c] = new_qty
     return out
 
-def _lookahead_delivery_qty(ss_prev, dem_d, dems, di, safety, pkg):
-    """Поставка, если после спроса сегодня + ближайшего будущего спроса остаток < страхового."""
-    la = _lookahead_demand(dems, di)
-    proj = ss_prev - dem_d - (la if la > 0 else 0.0)
-    if (dem_d <= 0 and la <= 0) or proj >= safety:
+def _demand_day_delivery_qty(ss_prev, dem_d, safety, pkg):
+    """Поставка только в день спроса: если после спроса остаток < страхового."""
+    if dem_d <= 0:
+        return 0.0
+    proj = ss_prev - dem_d
+    if proj >= safety:
         return 0.0
     need = safety - proj
     del_d = _ceiling_pkg_qty(max(0, need), pkg)
@@ -2596,38 +2597,13 @@ def _build_initial_deliveries(code, supplier):
     dems = _delivery_series_demand(code)
     pkg = max(1, bom.get(code, {}).get('package', 1))
     safety = _delivery_safety_qty(code, supplier)
-    mode = _delivery_mode(supplier)
     n = len(dems)
     dels = [0.0] * n
-
-    if mode == 'monthly_early':
-        del_days = _monthly_early_delivery_indices()
-    elif mode == 'monthly_lag':
-        del_days = _ecotexis_delivery_indices()
-    elif mode == 'smc_weekly':
-        del_days = _weekday_delivery_indices(SMC_WEEKDAY)
-    elif mode == 'weekly':
-        del_days = _weekday_delivery_indices(PUREM_WEEKDAY)
-    else:
-        del_days = []
-
-    del_set = set(del_days)
-    next_map = {
-        del_days[i]: (del_days[i + 1] if i + 1 < len(del_days) else n)
-        for i in range(len(del_days))
-    }
-
     ss_prev = float(stock.get(code, 0))
     for di in range(n):
         dt = all_dates[di][0]
         dem_d = dems[di]
-        del_d = 0.0
-        if di in del_set:
-            del_d = _period_delivery_qty(
-                ss_prev, dems, di, next_map[di], safety, pkg)
-        if dt.weekday() != 6:
-            la_del = _lookahead_delivery_qty(ss_prev, dem_d, dems, di, safety, pkg)
-            del_d = max(del_d, la_del)
+        del_d = _demand_day_delivery_qty(ss_prev, dem_d, safety, pkg)
         dels[di] = del_d
         ss_prev = _ss_after_day(ss_prev, dem_d, del_d, code, dt)
     return dels
@@ -2859,14 +2835,13 @@ for ri, code in enumerate(all_codes, _MAN_STOCK_DATA_START):
         c.font = Font(size=9, name="Arial")
         c.alignment = Alignment(horizontal='center', vertical='center')
 
-# ── Precompute: Ss-колонка последнего дня мая в График_Поставок ─────────────
+# ── Precompute: Ss-колонка последнего дня месяца в График_Поставок ─────────────
 # График_Поставок: col A=Код, для дня di:
-#   Del-col = 8 + di*2       (чётный offset)
-#   Ss-col  = 8 + di*2 + 1   (нечётный offset) ← именно её используем для VLOOKUP
-# Данные начинаются с row 4 (_gp_data_start=4).
+#   Ss-col  = 8 + di*2       (дата дд.мм, остаток)
+#   Del-col = 8 + di*2 + 1   (📦 поставка — только если есть спрос в этот день)
 _gp_last_mon_col = {}  # mnum -> (col_letter, col_num) Ss-колонки последнего дня месяца
 for _di, (_dt, _mn, _d) in enumerate(all_dates):
-    _cn = 8 + _di * 2 + 1   # Ss-колонка (нечётный offset)
+    _cn = 8 + _di * 2
     _gp_last_mon_col[_mn] = (get_column_letter(_cn), _cn)
 # После цикла: _gp_last_mon_col[5] = Ss последнего дня мая (May 31)
 # Для июля: используем Потребность_Jun col I (Дефицит = остаток после июньского спроса)
@@ -3238,12 +3213,10 @@ for mi_ord,(mnum,mlabel,n_days) in enumerate(MONTHS):
             _c12.alignment = Alignment(horizontal='center', vertical='center')
             if fb: _c12.fill = fb
 
-# ── График_Поставок ── структура как DeliveryMay/June: Del | Ss на каждый день ──
+# ── График_Поставок ── Ss | Del на каждый день ──
 # Для каждого дня d — 2 колонки:
-#   ci_del = 8 + di*2      → Поставка (авто-расчёт, =0 если не нужна)
-#   ci_ss  = 8 + di*2 + 1  → Остаток  (= prev_Ss - Спрос_d + Поставка_d)
-# Логика поставки: если (Ss_d - Спрос_{d+1}) < страховой → поставить CEILING(...)*pkg
-# Это зеркало логики DeliveryMay, но автоматизированное.
+#   ci_ss  = 8 + di*2      → Остаток (дата дд.мм; = prev_Ss - Спрос_d + Поставка_d)
+#   ci_del = 8 + di*2 + 1  → Поставка (📦; только если спрос_d > 0 и остаток < страх.)
 print("  График_Поставок (Del|Ss по дням)...")
 from openpyxl.formatting.rule import FormulaRule as _FR_gp
 ws_g = wb_out.create_sheet('График_Поставок')
@@ -3264,43 +3237,25 @@ def _gp_demand_ref(gp_ri, mnum, day_d):
     cell = f"{sname}!{col}{prow}"
     return f"IF(ISBLANK({cell}),0,{cell})"
 
+def _gp_ci_ss(di):
+    return 8 + di * 2
+
+def _gp_ci_del(di):
+    return 8 + di * 2 + 1
+
 def _gp_prev_ss_ref(gp_ri, di):
     if di == 0:
         return f"G{gp_ri}"
-    return f"{get_column_letter(8 + (di - 1) * 2 + 1)}{gp_ri}"
-
-def _gp_lookahead_demand_formula(gp_ri, di):
-    """Ближайший будущий спрос (до 7 дней, без воскресений) — зеркало _lookahead_demand."""
-    candidates = []
-    for lk in range(1, 8):
-        if di + lk >= len(all_dates):
-            break
-        dt, mn, d = all_dates[di + lk]
-        if dt.weekday() == 6:
-            continue
-        candidates.append(_gp_demand_ref(gp_ri, mn, d))
-    if not candidates:
-        return "0"
-    expr = "0"
-    for dem in reversed(candidates):
-        expr = f"IF({dem}>0,{dem},{expr})"
-    return expr
-
-def _gp_not_sunday_formula(dt):
-    return f"WEEKDAY(DATE({dt.year},{dt.month},{dt.day}),2)<>7"
+    return f"{get_column_letter(_gp_ci_ss(di - 1))}{gp_ri}"
 
 def _gp_del_formula(gp_ri, di):
-    """Поставка: если (остаток_нач − спрос_сегодня − спрос_вперёд) < страхового → CEILING×уп."""
-    dt, mnum, day_d = all_dates[di]
-    if dt.weekday() == 6:
-        return "=0"
+    """Поставка только в день спроса: если (остаток_нач − спрос) < страхового → CEILING×уп."""
+    _, mnum, day_d = all_dates[di]
     prev_ss = _gp_prev_ss_ref(gp_ri, di)
     dem_today = _gp_demand_ref(gp_ri, mnum, day_d)
-    dem_next = _gp_lookahead_demand_formula(gp_ri, di)
-    proj = f"({prev_ss}-{dem_today}-{dem_next})"
-    sun = _gp_not_sunday_formula(dt)
+    proj = f"({prev_ss}-{dem_today})"
     return (
-        f"=IF(AND({sun},OR({dem_today}>0,{dem_next}>0),{proj}<F{gp_ri}),"
+        f"=IF(AND({dem_today}>0,{proj}<F{gp_ri}),"
         f"CEILING(MAX(0,F{gp_ri}-{proj})/E{gp_ri},1)*E{gp_ri},0)"
     )
 
@@ -3308,7 +3263,7 @@ def _gp_del_formula(gp_ri, di):
 t = ws_g.cell(1, 1)
 t.value = (f"ГРАФИК ПОСТАВОК | {PERIOD_LABEL}  |  "
            "🟢 Поставка  🔴 Дефицит  🟡 Ниже страх.запаса  "
-           "G = остаток нач.мес.  |  Del/Ss = формулы (спрос из Потребность)  |  "
+           "G = остаток нач.мес.  |  📦 только в дни спроса (кол. после даты)  |  "
            "Ecoal'yance: 1×/мес (1–5) | Ecotexis: +35д от заказа | "
            f"Purem/SMC: 1×/нед | SMC ≤{SMC_MAX_PALLETS_PER_TRUCK} палл./фура")
 t.font = Font(bold=True, size=9, color="FFFFFF", name="Arial")
@@ -3339,25 +3294,23 @@ for mnum_m, mlabel_m, ndays_m in MONTHS:
     mc.alignment = Alignment(horizontal='center', vertical='center')
     ws_g.merge_cells(f'{get_column_letter(col_first)}2:{get_column_letter(col_last)}2')
 
-# Строка 3: чередующиеся заголовки «📦» | «дд.мм»
+# Строка 3: чередующиеся заголовки «дд.мм» | «📦»
 _DEL_FILL = fill("C6EFCE")   # зелёный — колонка поставки
 for di, (dt, mnum_h, d_h) in enumerate(all_dates):
-    ci_del = 8 + di * 2
-    ci_ss  = 8 + di * 2 + 1
-    # Заголовок Del
-    c_dh = ws_g.cell(3, ci_del)
-    c_dh.value = '📦'
-    c_dh.font  = Font(bold=True, size=8, name="Arial")
-    c_dh.fill  = _DEL_FILL
-    c_dh.alignment = Alignment(horizontal='center', vertical='center')
-    ws_g.column_dimensions[get_column_letter(ci_del)].width = 5.5
-    # Заголовок Ss
+    ci_ss  = _gp_ci_ss(di)
+    ci_del = _gp_ci_del(di)
     c_sh = ws_g.cell(3, ci_ss)
     c_sh.value = dt.strftime('%d.%m')
     c_sh.font  = Font(bold=True, color="FFFFFF", size=8, name="Arial")
     c_sh.fill  = M_FILL[mnum_h]
     c_sh.alignment = Alignment(horizontal='center', vertical='center')
     ws_g.column_dimensions[get_column_letter(ci_ss)].width = 5.5
+    c_dh = ws_g.cell(3, ci_del)
+    c_dh.value = '📦'
+    c_dh.font  = Font(bold=True, size=8, name="Arial")
+    c_dh.fill  = _DEL_FILL
+    c_dh.alignment = Alignment(horizontal='center', vertical='center')
+    ws_g.column_dimensions[get_column_letter(ci_del)].width = 5.5
 
 # Данные: строки 4+
 _gp_data_start = 4
@@ -3393,11 +3346,11 @@ for ri, code in enumerate(mrp_codes, _gp_data_start):
     cg.alignment = Alignment(horizontal='center', vertical='center')
     cg.fill = CYN_F
 
-    # H+: Del — формула (остаток−спрос−спрос_вперёд < страх.); Ss — снимок или prev−спрос+поставка
+    # H+: Ss (остаток) | Del (поставка только в дни спроса)
     _man_ri = stock_input_row.get(code)
     for di, (dt, mnum_d, day_d) in enumerate(all_dates):
-        ci_del = 8 + di * 2
-        ci_ss  = 8 + di * 2 + 1
+        ci_ss  = _gp_ci_ss(di)
+        ci_del = _gp_ci_del(di)
         prev_ss  = _gp_prev_ss_ref(ri, di)
         dem_expr = _gp_demand_ref(ri, mnum_d, day_d)
         del_col  = get_column_letter(ci_del)
@@ -3408,14 +3361,6 @@ for ri, code in enumerate(mrp_codes, _gp_data_start):
         else:
             ss_formula = f"={prev_ss}-{dem_expr}+{del_col}{ri}"
 
-        c_del = ws_g.cell(ri, ci_del)
-        c_del.value = _gp_del_formula(ri, di)
-        c_del.font = Font(size=8, name="Arial", bold=True)
-        c_del.number_format = '#,##0'
-        c_del.alignment = Alignment(horizontal='center', vertical='center')
-        # Leave fill for conditional formatting
-
-        # Write Ss cell
         c_ss = ws_g.cell(ri, ci_ss)
         c_ss.value = ss_formula
         c_ss.font = Font(size=8, name="Arial")
@@ -3423,25 +3368,31 @@ for ri, code in enumerate(mrp_codes, _gp_data_start):
         c_ss.alignment = Alignment(horizontal='center', vertical='center')
         if fb: c_ss.fill = fb
 
+        c_del = ws_g.cell(ri, ci_del)
+        c_del.value = _gp_del_formula(ri, di)
+        c_del.font = Font(size=8, name="Arial", bold=True)
+        c_del.number_format = '#,##0'
+        c_del.alignment = Alignment(horizontal='center', vertical='center')
+
 # Условное форматирование
 _gp_last_row = _gp_data_start + len(mrp_codes) - 1
 _gp_filter_last_row = max(_gp_last_row, 3)
 ws_g.auto_filter.ref = f"A3:{get_column_letter(_total_cols_gp)}{_gp_filter_last_row}"
-# Del колонки (H, J, L, ...): зелёный если > 0
+# Del колонки (I, K, M, ...): зелёный если > 0
 _del_range = f"H{_gp_data_start}:{get_column_letter(_total_cols_gp)}{_gp_last_row}"
 ws_g.conditional_formatting.add(_del_range, _FR_gp(
-    formula=[f"AND(COLUMN(H{_gp_data_start})<>COLUMN(H{_gp_data_start})+1,H{_gp_data_start}>0,MOD(COLUMN(H{_gp_data_start})-8,2)=0)"],
+    formula=[f"AND(MOD(COLUMN(H{_gp_data_start})-8,2)=1,H{_gp_data_start}>0)"],
     fill=PatternFill("solid", fgColor="C6EFCE"),
     font=Font(color="375623", bold=True, size=8, name="Arial")))
-# Ss колонки: красный если < 0
-_ss_range = f"I{_gp_data_start}:{get_column_letter(_total_cols_gp)}{_gp_last_row}"
+# Ss колонки (H, J, L, ...): красный если < 0
+_ss_range = f"H{_gp_data_start}:{get_column_letter(_total_cols_gp)}{_gp_last_row}"
 ws_g.conditional_formatting.add(_ss_range, _FR_gp(
-    formula=[f"AND(MOD(COLUMN(I{_gp_data_start})-8,2)=1,I{_gp_data_start}<0)"],
+    formula=[f"AND(MOD(COLUMN(H{_gp_data_start})-8,2)=0,H{_gp_data_start}<0)"],
     fill=PatternFill("solid", fgColor="FFC7CE"),
     font=Font(color="9C0006", bold=True, size=8, name="Arial")))
 # Ss колонки: жёлтый если ниже страхового
 ws_g.conditional_formatting.add(_ss_range, _FR_gp(
-    formula=[f"AND(MOD(COLUMN(I{_gp_data_start})-8,2)=1,I{_gp_data_start}>=0,I{_gp_data_start}<$F{_gp_data_start})"],
+    formula=[f"AND(MOD(COLUMN(H{_gp_data_start})-8,2)=0,H{_gp_data_start}>=0,H{_gp_data_start}<$F{_gp_data_start})"],
     fill=PatternFill("solid", fgColor="FFEB9C"),
     font=Font(color="9C5700", size=8, name="Arial")))
 
