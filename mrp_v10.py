@@ -1479,6 +1479,9 @@ if os.path.exists(OUT):
                 date_val = row[5] if len(row) > 5 else None  # col F = Дата остатка
                 manual_date = _parse_manual_stock_date(date_val)
                 if manual_date is not None:
+                    source_date = stock_date_map.get(code, _stock_date)
+                    if manual_date == source_date:
+                        continue
                     manual_stock_date_override[code] = manual_date
                     manual_date_count += 1
         print(f"  Ручных остатков из Ввод_Остатков: {manual_count}")
@@ -2664,7 +2667,7 @@ for ri,code in enumerate(all_codes,3):
     ws_man.row_dimensions[ri].height=14
     fb=GRY_F if ri%2==0 else NO_F
     name,supp,unit=get_info(code); stk=stock.get(code,0)
-    stock_dt = get_stock_date(code)
+    stock_dt = manual_stock_date_override.get(code)
     for ci,v in enumerate([code,name[:50],supp,unit,stk,stock_dt],1):
         c=ws_man.cell(ri,ci); c.value=v
         c.font=Font(size=9,name="Arial")
