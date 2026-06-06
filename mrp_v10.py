@@ -1064,8 +1064,8 @@ def get_safety_days(code, supplier=''):
     if v is not None: return v
     return SAFETY_DAYS
 
-def _parse_manual_stock_date(value):
-    """Parse stock date from Ввод_Остатков col F; blank means keep current source date."""
+def _normalize_stock_date(value):
+    """Normalize any supported stock-date value to datetime.date or None."""
     if value is None or value == '':
         return None
     if isinstance(value, datetime.datetime):
@@ -1086,6 +1086,18 @@ def _parse_manual_stock_date(value):
         except ValueError:
             pass
     return None
+
+def _parse_manual_stock_date(value):
+    """Parse stock date from Ввод_Остатков col F; blank means keep current source date."""
+    return _normalize_stock_date(value)
+
+def _same_stock_date(left, right):
+    left_n = _normalize_stock_date(left)
+    right_n = _normalize_stock_date(right)
+    return left_n == right_n
+
+def _baseline_stock_date(code, stock_date_baseline):
+    return stock_date_baseline.get(code, _stock_date)
 
 def get_stock_date(code):
     """Дата актуальности остатков для данного кода.
@@ -1430,6 +1442,9 @@ print("Loading packaging...")
 manual_stock_override = {}  # code -> qty (ручной ввод из Ввод_Остатков)
 manual_stock_date_override = {}  # code -> date (ручная дата актуальности остатка)
 manual_deliveries     = {}  # не используется, сохраняется для совместимости simulate_deliveries
+stock_baseline = dict(stock)
+stock_date_baseline = dict(stock_date_map)
+_calc_last_date = datetime.date(MONTH_YEAR[MONTHS[-1][0]], MONTHS[-1][0], MONTHS[-1][2])
 
 if os.path.exists(OUT):
     try:
@@ -1462,8 +1477,10 @@ if os.path.exists(OUT):
                 except: pass
         print(f"  Упаковок из MRP (LIVE): {pkg_loaded}")
         # B. Ручные остатки из Ввод_Остатков — col E (индекс 4), дата — col F (индекс 5)
+        # Применяем только если значение реально изменено относительно файлов остатков.
         manual_count = 0
         manual_date_count = 0
+        ignored_date_count = 0
         if 'Ввод_Остатков' in wb_live.sheetnames:
             for row in wb_live['Ввод_Остатков'].iter_rows(min_row=3, values_only=True):
                 code = str(row[0]).strip() if row[0] else ''
@@ -1472,20 +1489,26 @@ if os.path.exists(OUT):
                 if val is not None:
                     try:
                         q = float(val)
-                        if q > 0:
+                        baseline_q = stock_baseline.get(code, 0)
+                        if abs(q - baseline_q) > 1e-6:
                             manual_stock_override[code] = q
                             manual_count += 1
                     except: pass
                 date_val = row[5] if len(row) > 5 else None  # col F = Дата остатка
                 manual_date = _parse_manual_stock_date(date_val)
                 if manual_date is not None:
-                    source_date = stock_date_map.get(code, _stock_date)
-                    if manual_date == source_date:
+                    baseline_date = _baseline_stock_date(code, stock_date_baseline)
+                    if _same_stock_date(manual_date, baseline_date):
+                        continue
+                    if manual_date > _calc_last_date:
+                        ignored_date_count += 1
                         continue
                     manual_stock_date_override[code] = manual_date
                     manual_date_count += 1
         print(f"  Ручных остатков из Ввод_Остатков: {manual_count}")
         print(f"  Ручных дат остатков из Ввод_Остатков: {manual_date_count}")
+        if ignored_date_count:
+            print(f"  ℹ️  Игнорировано дат остатков позже расчётного горизонта: {ignored_date_count}")
         wb_live.close()
     except Exception as e:
         print(f"  ⚠️  Ошибка чтения LIVE файла: {e}")
@@ -2655,7 +2678,7 @@ for _ci in (5, 6):
 if stock_sources:
     src_names_display = sorted(set(n for s in stock_src.values() for n in s))
     msg=(f"✅ ОСТАТКИ ЗАГРУЖЕНЫ: {len(stock)} деталей из {len(src_names_display)} файла(ов): {', '.join(n[:20] for n in src_names_display)}"
-         f"  |  ✏️ Измените Остаток (col E) и Дату остатка (col F) → при следующем запуске пересчитаются: График_Поставок, Потребность и Заказы всех месяцев.")
+         f"  |  ✏️ Измените Остаток (col E) и/или Дату остатка (col F) → при следующем запуске пересчитаются: График_Поставок, Потребность и Заказы всех месяцев. Пустая F = дата из файлов остатков.")
     fc="1F6B00"; bg=fill("E2EFDA")
 else:
     msg="ОСТАТКИ НЕ ЗАГРУЖЕНЫ. Загрузите xlsx/csv с двумя колонками: [Код детали, Кол-во]  |  ✏️ Колонка E — ручной ввод остатков, F — дата остатка"
