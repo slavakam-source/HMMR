@@ -3254,6 +3254,15 @@ ws_g.row_dimensions[3].height = 20
 
 _n_day_cols_gp = len(all_dates)           # 92 дня
 _total_cols_gp = 7 + _n_day_cols_gp * 2  # 7 fix + 2*92 = 191
+_POTREB_DAY_COL_START = len(FH)         # 9 фикс. колонок → день 1 = col 10
+
+def _gp_demand_ref(gp_ri, mnum, day_d):
+    """Дневной спрос из Потребность_* (строка на 1 выше, чем в График_Поставок)."""
+    sname = f"Потребность_{MONTH_SHORT[mnum]}"
+    col = get_column_letter(_POTREB_DAY_COL_START + day_d)
+    prow = gp_ri - 1
+    cell = f"{sname}!{col}{prow}"
+    return f"IF(ISBLANK({cell}),0,{cell})"
 
 # Строка 1: заголовок
 t = ws_g.cell(1, 1)
@@ -3323,12 +3332,6 @@ for ri, code in enumerate(mrp_codes, _gp_data_start):
     avg_daily  = total_3m / n_days_3m if n_days_3m else 0
     safety_qty = round(avg_daily * sd, 2)
     stk_fallback = int(stock.get(code, 0))
-    # Обнуляем спрос до даты актуальности остатков (включительно) — эти дни уже прошли
-    _code_sdate = get_stock_date(code)
-    daily_dem = [
-        round(demand[code].get(mn, {}).get(d, 0), 4) if dt > _code_sdate else 0.0
-        for (dt, mn, d) in all_dates
-    ]
 
     # A-E: статика
     for ci, v in enumerate([code, name[:46], supp, unit, pkg], 1):
@@ -3358,15 +3361,15 @@ for ri, code in enumerate(mrp_codes, _gp_data_start):
         ci_del = 8 + di * 2
         ci_ss  = 8 + di * 2 + 1
         prev_ss  = f"G{ri}" if di == 0 else f"{get_column_letter(8 + (di-1)*2 + 1)}{ri}"
-        dem_d    = daily_dem[di]
+        dem_expr = _gp_demand_ref(ri, mnum_d, day_d)
         del_col  = get_column_letter(ci_del)
         del_val  = _sched_dels[di] if di < len(_sched_dels) else 0.0
         _man_ci = stock_input_date_col.get(dt)
         if _man_ri and _man_ci:
             _man_cell = f"Ввод_Остатков!{get_column_letter(_man_ci)}{_man_ri}"
-            ss_formula = f"=IF(ISNUMBER({_man_cell}),{_man_cell},{prev_ss}-{dem_d}+{del_col}{ri})"
+            ss_formula = f"=IF(ISNUMBER({_man_cell}),{_man_cell},{prev_ss}-{dem_expr}+{del_col}{ri})"
         else:
-            ss_formula = f"={prev_ss}-{dem_d}+{del_col}{ri}"
+            ss_formula = f"={prev_ss}-{dem_expr}+{del_col}{ri}"
 
         c_del = ws_g.cell(ri, ci_del)
         c_del.value = del_val if del_val else None
