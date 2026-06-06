@@ -546,15 +546,34 @@ def cfg_match(cfg_key, applicable):
     return None, 0
 
 
+def _cfg_model_config(key):
+    """('A01_2WD_premium') → ('A01','premium'); привод (2WD/4WD) игнорируется."""
+    parts = str(key).split('_')
+    if len(parts) >= 3:
+        return (parts[0], parts[2])
+    if len(parts) == 2:
+        return (parts[0], parts[1])
+    return (key, '')
+
+
 def _bumper_cfg_match(code, cfg_key, applicable_b):
-    """Дорестайл-бамперы XST33/AST33 — только точное A01_2WD_premium, без fuzzy/elite."""
-    if _is_prerestyle_bumper_code(code):
-        if cfg_key == PRERESTYLE_PREMIUM_CFG and PRERESTYLE_PREMIUM_CFG in applicable_b:
-            qty = applicable_b[PRERESTYLE_PREMIUM_CFG]
-            if isinstance(qty, (int, float)) and qty > 0:
-                return PRERESTYLE_PREMIUM_CFG, qty
+    """Бамперы сопоставляются по (модель, комплектация) без учёта привода.
+
+    Применяемость берётся из BOM (лист BOM_Детальный). 21-конфигурационный BOM
+    не содержит колонок B02_2WD_elite и B02_4WD_premium, но эти кузова есть в плане
+    и используют тот же бампер, что и B02 4WD elite / B02 2WD premium соответственно
+    — поэтому сравниваем по (модель+комплектация), привод не важен для бампера.
+    """
+    if not applicable_b:
         return None, 0
-    return cfg_match(cfg_key, applicable_b)
+    mc = _cfg_model_config(cfg_key)
+    for ak in applicable_b:
+        if _cfg_model_config(ak) == mc:
+            qty = applicable_b[ak] if isinstance(applicable_b, dict) else 1
+            if not (isinstance(qty, (int, float)) and qty > 0):
+                qty = 1
+            return ak, qty
+    return None, 0
 
 
 
@@ -1916,28 +1935,17 @@ all_codes = [c for c in all_codes if c not in OBSOLETE_CODES]
 for c in list(OBSOLETE_CODES):
     bom.pop(c, None); part_tab_map.pop(c, None); bumper_meta.pop(c, None)
 
-# Бамперы с цветовой раскраской — только вкладка AS_in_F_A (не AS_in_H_B по поставщику)
-# Применяемость A01_2WD_premium назначаем ТОЛЬКО реально заказываемым дорестайл-бамперам
-# (передний 2803120 / задний 2804104). Варианты 2803130 / 2804105 на premium не ставятся.
-_prerestyle_bumper_appl = 0
-_prerestyle_bumper_zero = 0
+# Бамперы — только вкладка AS_in_F_A (A01/B02/B04 собираются на F_A; H_B пуст).
+# Применяемость бамперов берётся НАПРЯМУЮ из BOM (BOM_Детальный), без хардкода:
+#   2803120/2804104 → A01 comfort/elite/premium; 2803130/2804105 → A01 Tech Plus;
+#   2803104/2804KN260004 → B02 elite; 2803105/2804KN260005 → B02/B04 premium+TechPlus.
+# Сопоставление с планом — по (модель, комплектация), привод не важен (см. _bumper_cfg_match).
+_bumper_tab_set = 0
 for _bcode in bumper_clr_map:
     CODE_TAB_OVERRIDES[_bcode] = 'AS_in_F_A'
-    if _is_prerestyle_premium_bumper_code(_bcode):
-        BOM_APPLICABILITY_OVERRIDES[_bcode] = {PRERESTYLE_PREMIUM_CFG}
-        if _bcode in bom:
-            bom[_bcode]['configs'] = {PRERESTYLE_PREMIUM_CFG: 1}
-        _prerestyle_bumper_appl += 1
-    elif _is_prerestyle_bumper_code(_bcode):
-        # 2803130 / 2804105 — не заказываются: убираем применяемость
-        BOM_APPLICABILITY_OVERRIDES[_bcode] = set()
-        if _bcode in bom:
-            bom[_bcode]['configs'] = {}
-        _prerestyle_bumper_zero += 1
-if _prerestyle_bumper_appl:
-    print(f"  Дорестайл-бамперы 2803120/2804104: {PRERESTYLE_PREMIUM_CFG} → {_prerestyle_bumper_appl} кодов")
-if _prerestyle_bumper_zero:
-    print(f"  Дорестайл-бамперы 2803130/2804105: не заказываются → {_prerestyle_bumper_zero} кодов (потребность 0)")
+    _bumper_tab_set += 1
+if _bumper_tab_set:
+    print(f"  Бамперы: вкладка AS_in_F_A, применяемость из BOM → {_bumper_tab_set} кодов")
 
 # ── Default упаковка для бамперов = 8 шт (если в BOM пусто или 1) ──
 DEFAULT_BUMPER_PKG = 8
@@ -2486,24 +2494,17 @@ def get_daily_demand(code, month_num):
     if code in bumper_meta:
         bm = bumper_meta[code]
         color_key = bm.get('color_key','')
-        if _is_prerestyle_bumper(code):
-            # Дорестайл-бамперы XST33/AST33: заказываются только 2803120/2804104
-            # (B02 2WD premium). Варианты 2803130/2804105 на premium не ставятся → 0.
-            if not _is_prerestyle_premium_bumper_code(code):
-                return {}
-            applicable_b = _prerestyle_bumper_applicable()
-        else:
-            applicable_b = bom.get(code, {}).get('configs', {})
-            if not isinstance(applicable_b, dict):
-                applicable_b = {k: 1 for k in applicable_b}
-            if code in bom and not applicable_b:
-                return {}
-            # Эвристика только для бамперов без строки в BOM
-            if not applicable_b and code not in bom:
-                if any(p in code for p in ('XKN61', 'KN260004', 'KN260005')):
-                    applicable_b = {'B02_4WD_elite': 1, 'B02_4WD_TechPlus': 1}
-                elif any(p in code for p in ('XST33', 'AST33', 'AKN02')):
-                    applicable_b = {PRERESTYLE_PREMIUM_CFG: 1}
+        # Применяемость бампера — из BOM (BOM_Детальный). Сопоставление по
+        # (модель, комплектация) без учёта привода (_bumper_cfg_match).
+        applicable_b = bom.get(code, {}).get('configs', {})
+        if not isinstance(applicable_b, dict):
+            applicable_b = {k: 1 for k in applicable_b}
+        # Запасная эвристика только если бампера НЕТ в BOM вообще.
+        if not applicable_b and code not in bom:
+            if any(p in code for p in ('XKN61', 'KN260004', 'KN260005')):
+                applicable_b = {'B02_4WD_elite': 1, 'B02_4WD_TechPlus': 1}
+            elif any(p in code for p in ('XST33', 'AST33', 'AKN02')):
+                applicable_b = {'A01_2WD_premium': 1}
         if not applicable_b:
             return {}
         # ── Дедуплицируем партии только с вкладок из part_tab_map ──
@@ -2596,9 +2597,7 @@ def _debug_bumper_day6(code):
                     continue
                 _bi = _get_batch_info(_tab, _bv)
                 _ck = _bumper_batch_cfg_key(_bi, code)
-                _ok, _ = _bumper_cfg_match(code, _ck, _prerestyle_bumper_applicable()
-                                           if _is_prerestyle_bumper_code(code)
-                                           else bom.get(code, {}).get('configs', {}))
+                _ok, _ = _bumper_cfg_match(code, _ck, bom.get(code, {}).get('configs', {}))
                 if not _ok:
                     continue
                 _clr = bumper_meta.get(code, {}).get('color_key', '')
