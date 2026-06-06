@@ -1122,6 +1122,33 @@ def get_stock_date(code):
     Если код есть в stock_date_map — берём её, иначе глобальная _stock_date."""
     return stock_date_map.get(code, _stock_date)
 
+def _calc_horizon_dates():
+    return [datetime.date(MONTH_YEAR[mn], mn, d) for mn, _, nd in MONTHS for d in range(1, nd + 1)]
+
+def _parse_stock_input_header_date(value):
+    """Parse dd.mm header on Ввод_Остатков into a date inside the calc horizon."""
+    norm = _normalize_stock_date(value)
+    if norm is not None:
+        return norm
+    s = str(value or '').strip()
+    if not s:
+        return None
+    for fmt in ('%d.%m', '%d.%m.%y'):
+        try:
+            parsed = datetime.datetime.strptime(s, fmt)
+            for dt in _calc_horizon_dates():
+                if dt.day == parsed.day and dt.month == parsed.month:
+                    return dt
+            return None
+        except ValueError:
+            pass
+    return None
+
+_MAN_STOCK_HDR_ROW = 3
+_MAN_STOCK_DATA_START = 4
+_MAN_STOCK_OPEN_COL = 5
+_MAN_STOCK_FIRST_DATE_COL = 6
+
 # ═══ STEP 2: Master BOM ══════════════════════════════════════
 # Priority: 1) Live BOM_Детальный из MRP_System_v9.xlsx (ручные правки),
 #           2) Master_BOM_актуальный.xlsx
@@ -1455,10 +1482,11 @@ print("Loading packaging...")
 # Приоритет источников упаковки:
 # 1) LIVE: Заказы_May col E из существующего MRP_System_v8.xlsx
 # 2) Fallback: Haval_Stock в Упаковка_локала.xlsx
-# Ручные остатки: Ввод_Остатков col E (Остаток) и col F (Дата остатка)
+# Ручные остатки: Ввод_Остатков col E (остаток на нач.мес.) + даты в колонках F+
 
-manual_stock_override = {}  # code -> qty (ручной ввод из Ввод_Остатков)
-manual_stock_date_override = {}  # code -> date (ручная дата актуальности остатка)
+manual_stock_override = {}  # code -> qty (остаток на начало месяца из Ввод_Остатков)
+manual_stock_by_date = {}  # code -> {date: qty} (снимки остатка по дням для График_Поставок)
+manual_stock_date_override = {}  # code -> date (legacy col F — дата актуальности для спроса)
 manual_deliveries     = {}  # не используется, сохраняется для совместимости simulate_deliveries
 stock_baseline = dict(stock)
 stock_date_baseline = dict(stock_date_map)
@@ -1494,16 +1522,35 @@ if os.path.exists(OUT):
                         pkg_loaded += 1
                 except: pass
         print(f"  Упаковок из MRP (LIVE): {pkg_loaded}")
-        # B. Ручные остатки из Ввод_Остатков — col E (индекс 4), дата — col F (индекс 5)
-        # Применяем только если значение реально изменено относительно файлов остатков.
+        # B. Ручные остатки из Ввод_Остатков
         manual_count = 0
+        manual_snap_count = 0
         manual_date_count = 0
         ignored_date_count = 0
         if 'Ввод_Остатков' in wb_live.sheetnames:
-            for row in wb_live['Ввод_Остатков'].iter_rows(min_row=3, values_only=True):
+            ws_man_live = wb_live['Ввод_Остатков']
+            hdr_row = next(ws_man_live.iter_rows(
+                min_row=_MAN_STOCK_HDR_ROW, max_row=_MAN_STOCK_HDR_ROW, values_only=True), ())
+            hdr_joined = ' '.join(str(x or '').lower() for x in hdr_row[:8])
+            is_date_grid = (
+                'дата остатка' not in hdr_joined
+                and any(
+                    _parse_stock_input_header_date(hdr_row[i])
+                    for i in range(_MAN_STOCK_FIRST_DATE_COL - 1, len(hdr_row))
+                    if i < len(hdr_row) and hdr_row[i] not in (None, '')
+                )
+            )
+            date_col_map = {}
+            if is_date_grid:
+                for ci in range(_MAN_STOCK_FIRST_DATE_COL - 1, len(hdr_row)):
+                    dt = _parse_stock_input_header_date(hdr_row[ci])
+                    if dt:
+                        date_col_map[ci] = dt
+            data_start = _MAN_STOCK_DATA_START if is_date_grid else 3
+            for row in ws_man_live.iter_rows(min_row=data_start, values_only=True):
                 code = str(row[0]).strip() if row[0] else ''
                 if not code or code == 'nan': continue
-                val = row[4] if len(row) > 4 else None  # col E = Остаток
+                val = row[4] if len(row) > 4 else None  # col E = остаток на нач.мес.
                 if val is not None:
                     try:
                         q = float(val)
@@ -1512,19 +1559,32 @@ if os.path.exists(OUT):
                             manual_stock_override[code] = q
                             manual_count += 1
                     except: pass
-                date_val = row[5] if len(row) > 5 else None  # col F = Дата остатка
-                manual_date = _parse_manual_stock_date(date_val)
-                if manual_date is not None:
-                    baseline_date = _baseline_stock_date(code, stock_date_baseline)
-                    if _same_stock_date(manual_date, baseline_date):
-                        continue
-                    if manual_date > _calc_last_date:
-                        ignored_date_count += 1
-                        continue
-                    manual_stock_date_override[code] = manual_date
-                    manual_date_count += 1
-        print(f"  Ручных остатков из Ввод_Остатков: {manual_count}")
-        print(f"  Ручных дат остатков из Ввод_Остатков: {manual_date_count}")
+                if is_date_grid:
+                    for ci, dt in date_col_map.items():
+                        if ci >= len(row) or row[ci] in (None, ''):
+                            continue
+                        try:
+                            snap_q = float(row[ci])
+                        except: 
+                            continue
+                        manual_stock_by_date.setdefault(code, {})[dt] = snap_q
+                        manual_snap_count += 1
+                else:
+                    date_val = row[5] if len(row) > 5 else None  # legacy col F
+                    manual_date = _parse_manual_stock_date(date_val)
+                    if manual_date is not None:
+                        baseline_date = _baseline_stock_date(code, stock_date_baseline)
+                        if _same_stock_date(manual_date, baseline_date):
+                            continue
+                        if manual_date > _calc_last_date:
+                            ignored_date_count += 1
+                            continue
+                        manual_stock_date_override[code] = manual_date
+                        manual_date_count += 1
+        print(f"  Ручных остатков (нач.мес.) из Ввод_Остатков: {manual_count}")
+        print(f"  Ручных снимков остатков по дням: {manual_snap_count}")
+        if manual_date_count:
+            print(f"  Ручных дат актуальности (legacy F): {manual_date_count}")
         if ignored_date_count:
             print(f"  ℹ️  Игнорировано дат остатков позже расчётного горизонта: {ignored_date_count}")
         wb_live.close()
@@ -2549,13 +2609,14 @@ def _build_initial_deliveries(code, supplier):
         }
         ss_prev = float(stock.get(code, 0))
         for di in range(n):
+            dt = all_dates[di][0]
             dem_d = dems[di]
             del_d = 0.0
             if di in del_set:
                 del_d = _period_delivery_qty(
                     ss_prev, dems, di, next_map[di], safety, pkg)
             dels[di] = del_d
-            ss_prev = ss_prev - dem_d + del_d
+            ss_prev = _ss_after_day(ss_prev, dem_d, del_d, code, dt)
         return dels
 
     ss_prev = float(stock.get(code, 0))
@@ -2568,16 +2629,24 @@ def _build_initial_deliveries(code, supplier):
                 need = safety - (ss_prev - dem_d - la)
                 del_d = _ceiling_pkg_qty(need, pkg) if need > 0 else pkg
         dels[di] = del_d
-        ss_prev = ss_prev - dem_d + del_d
+        ss_prev = _ss_after_day(ss_prev, dem_d, del_d, code, dt)
     return dels
+
+def _ss_after_day(ss_prev, dem_d, del_d, code, dt):
+    """Остаток на конец дня: ручной снимок из Ввод_Остатков или prev − спрос + поставка."""
+    snap = manual_stock_by_date.get(code, {}).get(dt)
+    if snap is not None:
+        return float(snap)
+    return ss_prev - dem_d + del_d
 
 def _recompute_ss_from_deliveries(code, dels):
     dems = _delivery_series_demand(code)
     ss_prev = float(stock.get(code, 0))
     pairs = []
     for di, dem_d in enumerate(dems):
+        dt = all_dates[di][0]
         del_d = dels[di]
-        ss_d = ss_prev - dem_d + del_d
+        ss_d = _ss_after_day(ss_prev, dem_d, del_d, code, dt)
         pairs.append((del_d, ss_d))
         ss_prev = ss_d
     return pairs
@@ -2703,37 +2772,92 @@ print(f"    Упаковка: {len(all_codes)} деталей")
 
 # ── Ввод_Остатков ─────────────────────────────────────────────
 print("  Ввод_Остатков...")
-ws_man=wb_out.create_sheet('Ввод_Остатков')
-ws_man.freeze_panes='A4'; ws_man.row_dimensions[1].height=40; ws_man.row_dimensions[2].height=14
-for ci,(h,w) in enumerate(zip(['Код детали','Наименование','Поставщик','Ед.','Остаток\n✏️ ручной ввод','Дата остатка\n✏️ дд.мм.гггг'],[22,44,16,6,18,14]),1):
-    hcell(ws_man,1,ci,h,H_FILL if ci not in (5,6) else fill("B8860B")); ws_man.column_dimensions[get_column_letter(ci)].width=w
-for _ci in (5, 6):
-    _he = ws_man.cell(1,_ci)
-    _he.font=Font(bold=True,color="FFFFFF",size=9,name="Arial")
-    _he.alignment=Alignment(horizontal='center',vertical='center',wrap_text=True)
+ws_man = wb_out.create_sheet('Ввод_Остатков')
+_n_date_cols_man = len(all_dates)
+_total_cols_man = _MAN_STOCK_OPEN_COL + _n_date_cols_man
+stock_input_date_col = {}
+stock_input_row = {}
+for di, (dt, _, _) in enumerate(all_dates):
+    stock_input_date_col[dt] = _MAN_STOCK_FIRST_DATE_COL + di
+
+ws_man.freeze_panes = 'F4'
+ws_man.row_dimensions[1].height = 40
+ws_man.row_dimensions[2].height = 16
+ws_man.row_dimensions[_MAN_STOCK_HDR_ROW].height = 20
+
+_MAN_FIX_H = ['Код детали', 'Наименование', 'Поставщик', 'Ед.', 'Остаток\n(нач.мес.)\n✏️']
+_MAN_FIX_W = [22, 44, 16, 6, 18]
+for ci, (h, w) in enumerate(zip(_MAN_FIX_H, _MAN_FIX_W), 1):
+    hcell(ws_man, 2, ci, h, H_FILL if ci != _MAN_STOCK_OPEN_COL else fill("B8860B"))
+    hcell(ws_man, _MAN_STOCK_HDR_ROW, ci, h, H_FILL if ci != _MAN_STOCK_OPEN_COL else fill("B8860B"))
+    ws_man.column_dimensions[get_column_letter(ci)].width = w
+    if ci == _MAN_STOCK_OPEN_COL:
+        for _hr in (2, _MAN_STOCK_HDR_ROW):
+            _he = ws_man.cell(_hr, ci)
+            _he.font = Font(bold=True, color="FFFFFF", size=9, name="Arial")
+            _he.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+
 if stock_sources:
     src_names_display = sorted(set(n for s in stock_src.values() for n in s))
-    msg=(f"✅ ОСТАТКИ ЗАГРУЖЕНЫ: {len(stock)} деталей из {len(src_names_display)} файла(ов): {', '.join(n[:20] for n in src_names_display)}"
-         f"  |  ✏️ Измените Остаток (col E) и/или Дату остатка (col F) → при следующем запуске пересчитаются: График_Поставок, Потребность и Заказы всех месяцев. Пустая F = дата из файлов остатков.")
-    fc="1F6B00"; bg=fill("E2EFDA")
+    msg = (f"✅ ОСТАТКИ ЗАГРУЖЕНЫ: {len(stock)} деталей из {len(src_names_display)} файла(ов): {', '.join(n[:20] for n in src_names_display)}"
+           f"  |  ✏️ E = остаток на начало месяца (для Потребность/Заказы)  |  "
+           f"жёлтые колонки по дням = снимок остатка → подставляется в График_Поставок (Ss) вместо формулы")
+    fc = "1F6B00"; bg = fill("E2EFDA")
 else:
-    msg="ОСТАТКИ НЕ ЗАГРУЖЕНЫ. Загрузите xlsx/csv с двумя колонками: [Код детали, Кол-во]  |  ✏️ Колонка E — ручной ввод остатков, F — дата остатка"
-    fc="C00000"; bg=fill("FFD7D7")
-c2=ws_man.cell(2,1); c2.value=msg; c2.font=Font(bold=True,size=9,color=fc,name="Arial")
-c2.fill=bg; c2.alignment=Alignment(horizontal='left',vertical='center')
-ws_man.merge_cells('A2:F2')
-for ri,code in enumerate(all_codes,3):
-    ws_man.row_dimensions[ri].height=14
-    fb=GRY_F if ri%2==0 else NO_F
-    name,supp,unit=get_info(code); stk=stock.get(code,0)
-    stock_dt = manual_stock_date_override.get(code)
-    for ci,v in enumerate([code,name[:50],supp,unit,stk,stock_dt],1):
-        c=ws_man.cell(ri,ci); c.value=v
-        c.font=Font(size=9,name="Arial")
-        c.alignment=Alignment(horizontal='left' if ci<=2 else 'center',vertical='center')
-        if ci==5: c.fill=YEL_F; c.number_format='#,##0.##'
-        elif ci==6: c.fill=YEL_F; c.number_format='DD.MM.YYYY'
-        elif fb: c.fill=fb
+    msg = ("ОСТАТКИ НЕ ЗАГРУЖЕНЫ. Загрузите xlsx/csv: [Код детали, Кол-во]  |  "
+           "✏️ E — остаток на нач.мес.; жёлтые ячейки по датам — ручной снимок для График_Поставок")
+    fc = "C00000"; bg = fill("FFD7D7")
+c1 = ws_man.cell(1, 1); c1.value = msg
+c1.font = Font(bold=True, size=9, color=fc, name="Arial")
+c1.fill = bg; c1.alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
+ws_man.merge_cells(f'A1:{get_column_letter(_total_cols_man)}1')
+
+for mnum_m, mlabel_m, ndays_m in MONTHS:
+    first_di = sum(nd for mn, _, nd in MONTHS if mn < mnum_m)
+    last_di = first_di + ndays_m - 1
+    col_first = _MAN_STOCK_FIRST_DATE_COL + first_di
+    col_last = _MAN_STOCK_FIRST_DATE_COL + last_di
+    mc = ws_man.cell(2, col_first)
+    mc.value = mlabel_m
+    mc.font = Font(bold=True, size=10, color="FFFFFF", name="Arial")
+    mc.fill = M_FILL[mnum_m]
+    mc.alignment = Alignment(horizontal='center', vertical='center')
+    ws_man.merge_cells(f'{get_column_letter(col_first)}2:{get_column_letter(col_last)}2')
+
+for di, (dt, mnum_h, _) in enumerate(all_dates):
+    ci = _MAN_STOCK_FIRST_DATE_COL + di
+    c_sh = ws_man.cell(_MAN_STOCK_HDR_ROW, ci)
+    c_sh.value = dt.strftime('%d.%m')
+    c_sh.font = Font(bold=True, color="FFFFFF", size=8, name="Arial")
+    c_sh.fill = M_FILL[mnum_h]
+    c_sh.alignment = Alignment(horizontal='center', vertical='center')
+    ws_man.column_dimensions[get_column_letter(ci)].width = 5.5
+
+for ri, code in enumerate(all_codes, _MAN_STOCK_DATA_START):
+    stock_input_row[code] = ri
+    ws_man.row_dimensions[ri].height = 14
+    fb = GRY_F if ri % 2 == 0 else NO_F
+    name, supp, unit = get_info(code)
+    stk = stock.get(code, 0)
+    snaps = manual_stock_by_date.get(code, {})
+    for ci, v in enumerate([code, name[:50], supp, unit, stk], 1):
+        c = ws_man.cell(ri, ci); c.value = v
+        c.font = Font(size=9, name="Arial")
+        c.alignment = Alignment(horizontal='left' if ci <= 2 else 'center', vertical='center')
+        if ci == _MAN_STOCK_OPEN_COL:
+            c.fill = YEL_F; c.number_format = '#,##0.##'
+        elif fb:
+            c.fill = fb
+    for di, (dt, _, _) in enumerate(all_dates):
+        ci = _MAN_STOCK_FIRST_DATE_COL + di
+        snap_v = snaps.get(dt)
+        c = ws_man.cell(ri, ci)
+        if snap_v is not None:
+            c.value = snap_v
+        c.fill = YEL_F
+        c.number_format = '#,##0.##'
+        c.font = Font(size=9, name="Arial")
+        c.alignment = Alignment(horizontal='center', vertical='center')
 
 # ── Precompute: Ss-колонка последнего дня мая в График_Поставок ─────────────
 # График_Поставок: col A=Код, для дня di:
@@ -3135,7 +3259,7 @@ _total_cols_gp = 7 + _n_day_cols_gp * 2  # 7 fix + 2*92 = 191
 t = ws_g.cell(1, 1)
 t.value = (f"ГРАФИК ПОСТАВОК | {PERIOD_LABEL}  |  "
            "🟢 Поставка  🔴 Дефицит  🟡 Ниже страх.запаса  "
-           "Остаток G = живой (из Ввод_Остатков)  |  "
+           "G = остаток на нач.мес.  |  Ss: снимок из Ввод_Остатков по дате (если введён)  |  "
            "Ecoal'yance: 1×/мес (1–5) | Ecotexis: +35д от заказа | "
            f"Purem/SMC: 1×/нед | SMC ≤{SMC_MAX_PALLETS_PER_TRUCK} палл./фура")
 t.font = Font(bold=True, size=9, color="FFFFFF", name="Arial")
@@ -3144,7 +3268,7 @@ t.alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
 ws_g.merge_cells(f'A1:{get_column_letter(_total_cols_gp)}1')
 
 # Строка 2: месячные метки (объединённые)
-_GP_FIX_H = ['Код детали','Наименование','Поставщик','Ед.','Уп.','Страх.\nшт','Остаток\n(Ввод.Ост.)']
+_GP_FIX_H = ['Код детали','Наименование','Поставщик','Ед.','Уп.','Страх.\nшт','Остаток\n(нач.мес.)']
 _GP_FIX_W = [22, 42, 16, 5, 5, 9, 11]
 for ci, (h, w) in enumerate(zip(_GP_FIX_H, _GP_FIX_W), 1):
     hcell(ws_g, 2, ci, h, H_FILL)
@@ -3219,16 +3343,17 @@ for ri, code in enumerate(mrp_codes, _gp_data_start):
     cf.alignment = Alignment(horizontal='center', vertical='center')
     cf.fill = fill("FFF2CC")
 
-    # G: живой остаток из Ввод_Остатков (VLOOKUP)
+    # G: остаток на начало месяца (для расчёта потребности; не меняется при снимках по дням)
     cg = ws_g.cell(ri, 7)
-    cg.value = f"=IFERROR(VLOOKUP(A{ri},Ввод_Остатков!$A:$E,5,0),{stk_fallback})"
+    cg.value = stk_fallback
     cg.font = Font(size=9, name="Arial", bold=True); cg.number_format = '#,##0'
     cg.alignment = Alignment(horizontal='center', vertical='center')
     cg.fill = CYN_F
 
-    # H+: Del — из Python (правила поставщика); Ss — формула от prev и Del
+    # H+: Del — из Python (правила поставщика); Ss — снимок из Ввод_Остатков или prev−спрос+поставка
     _sched = DELIVERY_SCHEDULES.get(code, {})
     _sched_dels = _sched.get('dels', [0.0] * len(all_dates))
+    _man_ri = stock_input_row.get(code)
     for di, (dt, mnum_d, day_d) in enumerate(all_dates):
         ci_del = 8 + di * 2
         ci_ss  = 8 + di * 2 + 1
@@ -3236,7 +3361,12 @@ for ri, code in enumerate(mrp_codes, _gp_data_start):
         dem_d    = daily_dem[di]
         del_col  = get_column_letter(ci_del)
         del_val  = _sched_dels[di] if di < len(_sched_dels) else 0.0
-        ss_formula = f"={prev_ss}-{dem_d}+{del_col}{ri}"
+        _man_ci = stock_input_date_col.get(dt)
+        if _man_ri and _man_ci:
+            _man_cell = f"Ввод_Остатков!{get_column_letter(_man_ci)}{_man_ri}"
+            ss_formula = f"=IF(ISNUMBER({_man_cell}),{_man_cell},{prev_ss}-{dem_d}+{del_col}{ri})"
+        else:
+            ss_formula = f"={prev_ss}-{dem_d}+{del_col}{ri}"
 
         c_del = ws_g.cell(ri, ci_del)
         c_del.value = del_val if del_val else None
