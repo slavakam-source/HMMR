@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+
+# MRP outputs (generated at runtime)
+MRP_System_v9.xlsx
+MRP_System_v8.xlsx
+MRP_System_v9_new.xlsx
+Графики_поставщиков/
+
+# Local demo fixtures (not part of the repo)
+*_demo.xlsx
