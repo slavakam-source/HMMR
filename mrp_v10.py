@@ -2582,6 +2582,16 @@ def _cap_smc_day_deliveries(raw_qty):
         out[c] = new_qty
     return out
 
+def _lookahead_delivery_qty(ss_prev, dem_d, dems, di, safety, pkg):
+    """Поставка, если после спроса сегодня + ближайшего будущего спроса остаток < страхового."""
+    la = _lookahead_demand(dems, di)
+    proj = ss_prev - dem_d - (la if la > 0 else 0.0)
+    if (dem_d <= 0 and la <= 0) or proj >= safety:
+        return 0.0
+    need = safety - proj
+    del_d = _ceiling_pkg_qty(max(0, need), pkg)
+    return del_d if del_d > 0 else float(pkg)
+
 def _build_initial_deliveries(code, supplier):
     dems = _delivery_series_demand(code)
     pkg = max(1, bom.get(code, {}).get('package', 1))
@@ -2599,35 +2609,25 @@ def _build_initial_deliveries(code, supplier):
     elif mode == 'weekly':
         del_days = _weekday_delivery_indices(PUREM_WEEKDAY)
     else:
-        del_days = None
+        del_days = []
 
-    if del_days is not None:
-        del_set = set(del_days)
-        next_map = {
-            del_days[i]: (del_days[i + 1] if i + 1 < len(del_days) else n)
-            for i in range(len(del_days))
-        }
-        ss_prev = float(stock.get(code, 0))
-        for di in range(n):
-            dt = all_dates[di][0]
-            dem_d = dems[di]
-            del_d = 0.0
-            if di in del_set:
-                del_d = _period_delivery_qty(
-                    ss_prev, dems, di, next_map[di], safety, pkg)
-            dels[di] = del_d
-            ss_prev = _ss_after_day(ss_prev, dem_d, del_d, code, dt)
-        return dels
+    del_set = set(del_days)
+    next_map = {
+        del_days[i]: (del_days[i + 1] if i + 1 < len(del_days) else n)
+        for i in range(len(del_days))
+    }
 
     ss_prev = float(stock.get(code, 0))
-    for di, (dt, _, _) in enumerate(all_dates):
+    for di in range(n):
+        dt = all_dates[di][0]
         dem_d = dems[di]
         del_d = 0.0
+        if di in del_set:
+            del_d = _period_delivery_qty(
+                ss_prev, dems, di, next_map[di], safety, pkg)
         if dt.weekday() != 6:
-            la = _lookahead_demand(dems, di)
-            if la > 0 and (ss_prev - dem_d - la) < safety:
-                need = safety - (ss_prev - dem_d - la)
-                del_d = _ceiling_pkg_qty(need, pkg) if need > 0 else pkg
+            la_del = _lookahead_delivery_qty(ss_prev, dem_d, dems, di, safety, pkg)
+            del_d = max(del_d, la_del)
         dels[di] = del_d
         ss_prev = _ss_after_day(ss_prev, dem_d, del_d, code, dt)
     return dels
@@ -3264,11 +3264,51 @@ def _gp_demand_ref(gp_ri, mnum, day_d):
     cell = f"{sname}!{col}{prow}"
     return f"IF(ISBLANK({cell}),0,{cell})"
 
+def _gp_prev_ss_ref(gp_ri, di):
+    if di == 0:
+        return f"G{gp_ri}"
+    return f"{get_column_letter(8 + (di - 1) * 2 + 1)}{gp_ri}"
+
+def _gp_lookahead_demand_formula(gp_ri, di):
+    """Ближайший будущий спрос (до 7 дней, без воскресений) — зеркало _lookahead_demand."""
+    candidates = []
+    for lk in range(1, 8):
+        if di + lk >= len(all_dates):
+            break
+        dt, mn, d = all_dates[di + lk]
+        if dt.weekday() == 6:
+            continue
+        candidates.append(_gp_demand_ref(gp_ri, mn, d))
+    if not candidates:
+        return "0"
+    expr = "0"
+    for dem in reversed(candidates):
+        expr = f"IF({dem}>0,{dem},{expr})"
+    return expr
+
+def _gp_not_sunday_formula(dt):
+    return f"WEEKDAY(DATE({dt.year},{dt.month},{dt.day}),2)<>7"
+
+def _gp_del_formula(gp_ri, di):
+    """Поставка: если (остаток_нач − спрос_сегодня − спрос_вперёд) < страхового → CEILING×уп."""
+    dt, mnum, day_d = all_dates[di]
+    if dt.weekday() == 6:
+        return "=0"
+    prev_ss = _gp_prev_ss_ref(gp_ri, di)
+    dem_today = _gp_demand_ref(gp_ri, mnum, day_d)
+    dem_next = _gp_lookahead_demand_formula(gp_ri, di)
+    proj = f"({prev_ss}-{dem_today}-{dem_next})"
+    sun = _gp_not_sunday_formula(dt)
+    return (
+        f"=IF(AND({sun},OR({dem_today}>0,{dem_next}>0),{proj}<F{gp_ri}),"
+        f"CEILING(MAX(0,F{gp_ri}-{proj})/E{gp_ri},1)*E{gp_ri},0)"
+    )
+
 # Строка 1: заголовок
 t = ws_g.cell(1, 1)
 t.value = (f"ГРАФИК ПОСТАВОК | {PERIOD_LABEL}  |  "
            "🟢 Поставка  🔴 Дефицит  🟡 Ниже страх.запаса  "
-           "G = остаток на нач.мес.  |  Ss: снимок из Ввод_Остатков по дате (если введён)  |  "
+           "G = остаток нач.мес.  |  Del/Ss = формулы (спрос из Потребность)  |  "
            "Ecoal'yance: 1×/мес (1–5) | Ecotexis: +35д от заказа | "
            f"Purem/SMC: 1×/нед | SMC ≤{SMC_MAX_PALLETS_PER_TRUCK} палл./фура")
 t.font = Font(bold=True, size=9, color="FFFFFF", name="Arial")
@@ -3353,17 +3393,14 @@ for ri, code in enumerate(mrp_codes, _gp_data_start):
     cg.alignment = Alignment(horizontal='center', vertical='center')
     cg.fill = CYN_F
 
-    # H+: Del — из Python (правила поставщика); Ss — снимок из Ввод_Остатков или prev−спрос+поставка
-    _sched = DELIVERY_SCHEDULES.get(code, {})
-    _sched_dels = _sched.get('dels', [0.0] * len(all_dates))
+    # H+: Del — формула (остаток−спрос−спрос_вперёд < страх.); Ss — снимок или prev−спрос+поставка
     _man_ri = stock_input_row.get(code)
     for di, (dt, mnum_d, day_d) in enumerate(all_dates):
         ci_del = 8 + di * 2
         ci_ss  = 8 + di * 2 + 1
-        prev_ss  = f"G{ri}" if di == 0 else f"{get_column_letter(8 + (di-1)*2 + 1)}{ri}"
+        prev_ss  = _gp_prev_ss_ref(ri, di)
         dem_expr = _gp_demand_ref(ri, mnum_d, day_d)
         del_col  = get_column_letter(ci_del)
-        del_val  = _sched_dels[di] if di < len(_sched_dels) else 0.0
         _man_ci = stock_input_date_col.get(dt)
         if _man_ri and _man_ci:
             _man_cell = f"Ввод_Остатков!{get_column_letter(_man_ci)}{_man_ri}"
@@ -3372,7 +3409,7 @@ for ri, code in enumerate(mrp_codes, _gp_data_start):
             ss_formula = f"={prev_ss}-{dem_expr}+{del_col}{ri}"
 
         c_del = ws_g.cell(ri, ci_del)
-        c_del.value = del_val if del_val else None
+        c_del.value = _gp_del_formula(ri, di)
         c_del.font = Font(size=8, name="Arial", bold=True)
         c_del.number_format = '#,##0'
         c_del.alignment = Alignment(horizontal='center', vertical='center')
