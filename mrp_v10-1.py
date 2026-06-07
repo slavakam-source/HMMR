@@ -3148,28 +3148,37 @@ def _ss_after_day(ss_prev, dem_d, del_d, code, dt):
         return float(snap)
     return ss_prev - dem_d + del_d
 
+def _delivery_arrival_qty(dems, dels, di):
+    """Приход в день di по модели Excel: del[пред.раб.дня] (день потребности до di)
+    или del[di-1] перед первым днём потребности."""
+    if di <= 0:
+        return 0.0
+    pwd = _prev_working_days(dems)
+    if pwd[di] is not None:
+        return float(dels[pwd[di]])
+    return float(dels[di - 1])
+
 def _recompute_ss_from_deliveries(code, dels):
-    """Модель «поставка предыдущего дня»: отгрузка del[d] приходит на следующий день
-    потребности после d. Остаток дня = остаток пред.дня − спрос + приход (del[пред.раб.дня]).
-    Объёмы могли быть сдвинуты лимитом фуры — приход пересобираем из итоговых del."""
+    """Остаток дня = остаток пред.дня − спрос + del[пред.раб.дня] (как в График_Поставок)."""
     dems = _delivery_series_demand(code)
     n = len(dems)
     supplier = bom.get(code, {}).get('supplier', '')
     safety = _delivery_safety_qty(code, supplier)
     first_wd = next((di for di in range(n) if dems[di] > 0), None)
-    arrival = [0.0] * n
-    for d in range(n):
-        if dels[d] > 0:
-            ax = _delivery_arrival_index(dems, d)
-            if ax is not None:
-                arrival[ax] += dels[d]
     ss_prev = float(stock.get(code, 0))
     if first_wd == 0:
         ss_prev = max(ss_prev, safety + dems[0])
+    elif first_wd is not None and first_wd > 0:
+        _startup = float(dels[first_wd - 1])
+        ss_prev = max(ss_prev, safety + dems[first_wd] - _startup)
     pairs = []
     for di, dem_d in enumerate(dems):
         dt = all_dates[di][0]
-        ss_d = _ss_after_day(ss_prev, dem_d, arrival[di], code, dt)
+        snap = manual_stock_by_date.get(code, {}).get(dt)
+        if snap is not None:
+            ss_d = float(snap)
+        else:
+            ss_d = ss_prev - dem_d + _delivery_arrival_qty(dems, dels, di)
         pairs.append((dels[di], ss_d))
         ss_prev = ss_d
     return pairs
@@ -3992,6 +4001,16 @@ def _gp_prev_ss_ref(gp_ri, di):
         return f"G{gp_ri}"
     return f"{get_column_letter(_gp_ci_ss(di - 1))}{gp_ri}"
 
+def _gp_arrival_del_ref(gp_ri, di, prevwd_idx, first_wd_idx):
+    """Ссылка на колонку Del: del[пред.раб.дня] или del[di-1] перед 1-м днём спроса."""
+    if di <= 0:
+        return ""
+    if prevwd_idx is not None:
+        ship_di = prevwd_idx
+    else:
+        ship_di = di - 1
+    return f"+{get_column_letter(_gp_ci_del(ship_di))}{gp_ri}"
+
 def _gp_del_formula(gp_ri, di):
     """Поставка дня D рассчитывается под спрос дня D+1 (приходит заранее).
     Цель на конец дня D (= начало D+1): не ниже страхового запаса (F) и не ниже
@@ -4087,11 +4106,20 @@ for ri, code in enumerate(mrp_codes, _gp_data_start):
     avg_daily  = total_3m / n_days_3m if n_days_3m else 0
     safety_qty = _safety_qty(code, supp)
     stk_fallback = int(stock.get(code, 0))
-    # MSA, деталь с потребностью в 1-й день горизонта: топ-ап нач.остатка (предзавоз до горизонта)
-    if normalize_supplier(supp) == MSA_SUPPLIER:
-        _d0c = demand.get(code, {}).get(all_dates[0][1], {}).get(all_dates[0][2], 0)
-        if _d0c > 0:
-            stk_fallback = max(stk_fallback, int(round(safety_qty + _d0c)))
+    _gp_dems_series = [demand.get(code, {}).get(_mx, {}).get(_dx, 0)
+                       for (_dtx, _mx, _dx) in all_dates]
+    _gp_firstwd_stk = next((_i for _i, _d in enumerate(_gp_dems_series) if _d > 0), None)
+    _gp_startup_del = 0.0
+    if _gp_firstwd_stk is not None and _gp_firstwd_stk > 0:
+        _ds0 = DELIVERY_SCHEDULES.get(code, {}).get('dels', [])
+        if _gp_firstwd_stk - 1 < len(_ds0):
+            _gp_startup_del = float(_ds0[_gp_firstwd_stk - 1] or 0)
+    if _gp_firstwd_stk == 0 and _gp_dems_series[0] > 0:
+        stk_fallback = max(stk_fallback, int(round(safety_qty + _gp_dems_series[0])))
+    elif _gp_firstwd_stk is not None and _gp_firstwd_stk > 0:
+        _min_g = safety_qty + _gp_dems_series[_gp_firstwd_stk] - _gp_startup_del
+        if _min_g > stk_fallback:
+            stk_fallback = max(stk_fallback, int(round(_min_g)))
 
     # A-E: статика
     for ci, v in enumerate([code, _name_with_appl(code,name), supp, unit, pkg], 1):
@@ -4129,13 +4157,8 @@ for ri, code in enumerate(mrp_codes, _gp_data_start):
         ci_del = _gp_ci_del(di)
         prev_ss  = _gp_prev_ss_ref(ri, di)
         dem_expr = _gp_demand_ref(ri, mnum_d, day_d)
-        _isdem = demand.get(code, {}).get(mnum_d, {}).get(day_d, 0) > 0
-        if _isdem and _gp_pwd[di] is not None:
-            _arr = f"+{get_column_letter(_gp_ci_del(_gp_pwd[di]))}{ri}"   # приход = пред. раб. день
-        elif _isdem and di == _gp_firstwd and di > 0:
-            _arr = f"+{get_column_letter(_gp_ci_del(di - 1))}{ri}"        # стартовая поставка
-        else:
-            _arr = ""                                                     # нерабочий день — прихода нет
+        # ss[d] = остаток_пред.дня − спрос[d] + del[пред.раб.дня] — на КАЖДЫЙ день (не только дни спроса).
+        _arr = _gp_arrival_del_ref(ri, di, _gp_pwd[di], _gp_firstwd)
         _man_ci = stock_input_date_col.get(dt)
         if _man_ri and _man_ci:
             _man_cell = f"Ввод_Остатков!{get_column_letter(_man_ci)}{_man_ri}"
