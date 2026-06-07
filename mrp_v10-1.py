@@ -4059,34 +4059,19 @@ for ri, code in enumerate(mrp_codes, _gp_data_start):
     cg.alignment = Alignment(horizontal='center', vertical='center')
     cg.fill = CYN_F
 
-    # H+: Ss (остаток) | Del (поставка только в дни спроса)
+    # H+: Ss (остаток) | Del (поставка)
     _man_ri = stock_input_row.get(code)
-    # Предыдущий рабочий день (день потребности) этой детали: его поставка ПРИХОДИТ сегодня
-    # и участвует в остатке текущего дня (модель «поставка предыдущего дня»).
-    _gp_is_msa = normalize_supplier(supp) == MSA_SUPPLIER
-    _gp_prevwd = [None] * len(all_dates)
-    _gp_lw = None
-    for _i, (_dtx, _mx, _dx) in enumerate(all_dates):
-        _gp_prevwd[_i] = _gp_lw
-        if demand.get(code, {}).get(_mx, {}).get(_dx, 0) > 0:
-            _gp_lw = _i
+    # Единая модель «поставка заранее»: поставка дня D показана в колонке дня D и
+    # участвует в остатке КОНЦА дня D (= начало D+1). Объём дня D рассчитан под спрос
+    # дня D+1 (см. _build_initial_deliveries), поэтому на начало дня спроса остаток
+    # уже перекрывает ≥50% и не уходит в минус. Без сдвига прихода на следующий день.
     for di, (dt, mnum_d, day_d) in enumerate(all_dates):
         ci_ss  = _gp_ci_ss(di)
         ci_dem = _gp_ci_dem(di)
         ci_del = _gp_ci_del(di)
         prev_ss  = _gp_prev_ss_ref(ri, di)
         dem_expr = _gp_demand_ref(ri, mnum_d, day_d)
-        if _gp_is_msa:
-            _pwd = _gp_prevwd[di]
-            _isdem_gp = demand.get(code, {}).get(mnum_d, {}).get(day_d, 0) > 0
-            if _pwd is not None:
-                _arr = f"+{get_column_letter(_gp_ci_del(_pwd))}{ri}"      # поставка пред. дня
-            elif _isdem_gp and di > 0:
-                _arr = f"+{get_column_letter(_gp_ci_del(di - 1))}{ri}"    # стартовая поставка
-            else:
-                _arr = ""
-        else:
-            _arr = f"+{get_column_letter(_gp_ci_del(di))}{ri}"           # прочие — поставка дня
+        _arr = f"+{get_column_letter(_gp_ci_del(di))}{ri}"   # поставка этого дня (same-day)
         _man_ci = stock_input_date_col.get(dt)
         if _man_ri and _man_ci:
             _man_cell = f"Ввод_Остатков!{get_column_letter(_man_ci)}{_man_ri}"
