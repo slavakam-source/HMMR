@@ -3076,26 +3076,69 @@ def _demand_day_delivery_qty(ss_prev, dem_d, safety, pkg):
     del_d = _ceiling_pkg_qty(max(0, need), pkg)
     return del_d if del_d > 0 else float(pkg)
 
+def _next_working_days(dems):
+    """Для каждого индекса — индекс СЛЕДУЮЩЕГО дня с потребностью (или None)."""
+    n = len(dems)
+    nwd = [None] * n
+    _nd = None
+    for di in range(n - 1, -1, -1):
+        nwd[di] = _nd
+        if dems[di] > 0:
+            _nd = di
+    return nwd
+
+def _prev_working_days(dems):
+    """Для каждого индекса — индекс ПРЕДЫДУЩЕГО дня с потребностью (или None)."""
+    n = len(dems)
+    pwd = [None] * n
+    _pd = None
+    for di in range(n):
+        pwd[di] = _pd
+        if dems[di] > 0:
+            _pd = di
+    return pwd
+
+def _delivery_arrival_index(dems, ship_di):
+    """День прихода отгрузки, отправленной в ship_di: следующий день потребности
+    строго после ship_di (отгрузка дня D приходит в начале следующего дня)."""
+    n = len(dems)
+    for x in range(ship_di + 1, n):
+        if dems[x] > 0:
+            return x
+    return None
+
 def _build_initial_deliveries(code, supplier):
+    """Модель «поставка предыдущего дня»: отгрузка дня D приходит на СЛЕДУЮЩИЙ день
+    потребности и закрывает его. Цель прихода = страх.запас + спрос след. дня
+    потребности → на начало дня спроса остаток покрывает спрос (≥50%, фактически 100%)
+    и не уходит в минус. Остаток дня = остаток пред.дня − спрос + приход (del[пред.раб.дня])."""
     dems = _delivery_series_demand(code)
     pkg = max(1, bom.get(code, {}).get('package', 1))
     safety = _delivery_safety_qty(code, supplier)
     n = len(dems)
     dels = [0.0] * n
-    ss_prev = float(stock.get(code, 0))
+    arrival = [0.0] * n
+    nwd = _next_working_days(dems)
+    first_wd = next((di for di in range(n) if dems[di] > 0), None)
+    ss = float(stock.get(code, 0))
+    # Стартовая поставка: приходит на 1-й день потребности (предыдущего дня нет в горизонте).
+    if first_wd is not None:
+        if first_wd == 0:
+            ss = max(ss, safety + dems[0])      # день 0 — нет дня до горизонта
+        else:
+            _need0 = _ceiling_pkg_qty(max(0, safety + dems[first_wd] - ss), pkg)
+            if _need0 > 0:
+                dels[first_wd - 1] += _need0
+                arrival[first_wd] += _need0
     for di in range(n):
         dt = all_dates[di][0]
-        dem_d = dems[di]
-        # Поставка ставится в ТЕКУЩИЙ день, но рассчитывается под СЛЕДУЮЩИЙ:
-        # остаток на конец дня (= начало следующего дня) должен быть не ниже
-        # страхового запаса и не ниже DELIVERY_START_COVER от потребности след. дня.
-        # Так на НАЧАЛО дня спроса остаток уже перекрывает ≥50% и не уходит в минус.
-        dem_next = dems[di + 1] if di + 1 < n else 0.0
-        target = max(safety, math.ceil(DELIVERY_START_COVER * dem_next))
-        proj = ss_prev - dem_d                      # конец дня до поставки
-        del_d = _ceiling_pkg_qty(target - proj, pkg) if proj < target else 0.0
-        dels[di] = del_d
-        ss_prev = _ss_after_day(ss_prev, dem_d, del_d, code, dt)
+        ss = _ss_after_day(ss, dems[di], arrival[di], code, dt)   # приход = arrival[di]
+        if dems[di] > 0 and nwd[di] is not None:
+            target = safety + dems[nwd[di]]
+            _q = _ceiling_pkg_qty(max(0, target - ss), pkg)
+            if _q > 0:
+                dels[di] += _q
+                arrival[nwd[di]] += _q
     return dels
 
 def _ss_after_day(ss_prev, dem_d, del_d, code, dt):
@@ -3106,16 +3149,27 @@ def _ss_after_day(ss_prev, dem_d, del_d, code, dt):
     return ss_prev - dem_d + del_d
 
 def _recompute_ss_from_deliveries(code, dels):
-    """Остаток на конец дня = остаток пред.дня − спрос + поставка этого дня.
-    Поставка del[di] рассчитана под спрос СЛЕДУЮЩЕГО дня (см. _build_initial_deliveries),
-    поэтому остаток на конец дня (= начало следующего дня) перекрывает ≥50% спроса
-    след. дня и не уходит в минус на начало дня."""
+    """Модель «поставка предыдущего дня»: отгрузка del[d] приходит на следующий день
+    потребности после d. Остаток дня = остаток пред.дня − спрос + приход (del[пред.раб.дня]).
+    Объёмы могли быть сдвинуты лимитом фуры — приход пересобираем из итоговых del."""
     dems = _delivery_series_demand(code)
+    n = len(dems)
+    supplier = bom.get(code, {}).get('supplier', '')
+    safety = _delivery_safety_qty(code, supplier)
+    first_wd = next((di for di in range(n) if dems[di] > 0), None)
+    arrival = [0.0] * n
+    for d in range(n):
+        if dels[d] > 0:
+            ax = _delivery_arrival_index(dems, d)
+            if ax is not None:
+                arrival[ax] += dels[d]
     ss_prev = float(stock.get(code, 0))
+    if first_wd == 0:
+        ss_prev = max(ss_prev, safety + dems[0])
     pairs = []
     for di, dem_d in enumerate(dems):
         dt = all_dates[di][0]
-        ss_d = _ss_after_day(ss_prev, dem_d, dels[di], code, dt)
+        ss_d = _ss_after_day(ss_prev, dem_d, arrival[di], code, dt)
         pairs.append((dels[di], ss_d))
         ss_prev = ss_d
     return pairs
@@ -4061,17 +4115,27 @@ for ri, code in enumerate(mrp_codes, _gp_data_start):
 
     # H+: Ss (остаток) | Del (поставка)
     _man_ri = stock_input_row.get(code)
-    # Единая модель «поставка заранее»: поставка дня D показана в колонке дня D и
-    # участвует в остатке КОНЦА дня D (= начало D+1). Объём дня D рассчитан под спрос
-    # дня D+1 (см. _build_initial_deliveries), поэтому на начало дня спроса остаток
-    # уже перекрывает ≥50% и не уходит в минус. Без сдвига прихода на следующий день.
+    # Модель «поставка предыдущего дня»: отгрузка показана в колонке дня отправки D,
+    # а ПРИХОДИТ на следующий день потребности и участвует в остатке того дня:
+    #   ss[d] = остаток_пред.дня − спрос[d] + del[пред.раб.дня]
+    # → на начало дня спроса остаток уже покрывает спрос (≥50%), без минуса.
+    _gp_pwd = _prev_working_days([demand.get(code, {}).get(_mx, {}).get(_dx, 0)
+                                  for (_dtx, _mx, _dx) in all_dates])
+    _gp_firstwd = next((_i for _i, (_dtx, _mx, _dx) in enumerate(all_dates)
+                        if demand.get(code, {}).get(_mx, {}).get(_dx, 0) > 0), None)
     for di, (dt, mnum_d, day_d) in enumerate(all_dates):
         ci_ss  = _gp_ci_ss(di)
         ci_dem = _gp_ci_dem(di)
         ci_del = _gp_ci_del(di)
         prev_ss  = _gp_prev_ss_ref(ri, di)
         dem_expr = _gp_demand_ref(ri, mnum_d, day_d)
-        _arr = f"+{get_column_letter(_gp_ci_del(di))}{ri}"   # поставка этого дня (same-day)
+        _isdem = demand.get(code, {}).get(mnum_d, {}).get(day_d, 0) > 0
+        if _isdem and _gp_pwd[di] is not None:
+            _arr = f"+{get_column_letter(_gp_ci_del(_gp_pwd[di]))}{ri}"   # приход = пред. раб. день
+        elif _isdem and di == _gp_firstwd and di > 0:
+            _arr = f"+{get_column_letter(_gp_ci_del(di - 1))}{ri}"        # стартовая поставка
+        else:
+            _arr = ""                                                     # нерабочий день — прихода нет
         _man_ci = stock_input_date_col.get(dt)
         if _man_ri and _man_ci:
             _man_cell = f"Ввод_Остатков!{get_column_letter(_man_ci)}{_man_ri}"
