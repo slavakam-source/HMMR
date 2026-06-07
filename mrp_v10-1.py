@@ -15,12 +15,21 @@ MRP v9 — устранение замечаний
 """
 import pandas as pd
 import re
-import math, os, json, datetime, warnings, glob
+import math, os, json, datetime, warnings, glob, sys
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.datetime import from_excel
 warnings.filterwarnings('ignore')
+
+# ── Консоль Windows (cp1251) падает при печати китайских имён файлов и эмодзи
+#    (UnicodeEncodeError). Переключаем stdout/stderr на UTF-8 с заменой
+#    непечатаемых символов, чтобы скрипт не прерывался на print(). ──
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
 
 # ══════════════════════════════════════════════════════════════
 # АВТО-ОПРЕДЕЛЕНИЕ ФАЙЛОВ
@@ -246,9 +255,8 @@ if _skipped_old:
 OBSOLETE_CODES = {
     '7005110XKJ22A',     # больше не поставляется (заменён на другой)
     '3101100xst33A',     # дубль 3101100XST33A (lowercase) — удалить
-    # ── Дорестайл-задние бампера B02 XKN61 (выходят из оборота, потребности нет) ──
-    '2804111XKN61A8T','2804111XKN61A9C','2804111XKN61AC3','2804111XKN61AH4',
-    '2804112XKN61A8T','2804112XKN61A9C','2804112XKN61AC3','2804112XKN61AH4',
+    # ── 2804111/2804112 XKN61 → перенесены в REFERENCE_ONLY_CODES (справочные,
+    #    видны в BOM, но потребность/заказы/график для них не считаются) ──
     # ── Больше не заказываем (замечания Корнеевой, Замечания-3) ──
     '5301120XST11A',     # A01 comfort — больше не применяем
     '5301501XST11A',     # A01 — больше не применяем
@@ -263,6 +271,15 @@ OBSOLETE_CODES = {
     # Purem — больше не используем
     '1201UQ8XGW01A', '1201UQ9XGW01A', '1201UR1XGW01A', '1201UR2XGW01A',
     '1205656XKJ22A', '1205657XKJ22A', '1205658XKJ22A', '1205659XKJ22A', '1205660XKJ22A',
+}
+
+# ── Справочные коды (REFERENCE-ONLY): присутствуют в BOM для справки, но
+#    потребность, заказы и график поставок для них НЕ рассчитываются.
+#    2804111/2804112 XKN61 — дубли задних бамперов 2804KN260004/2804KN260005
+#    (та же применяемость), заказываются по KN-кодам, эти — только справочно.
+REFERENCE_ONLY_CODES = {
+    '2804111XKN61A8T', '2804111XKN61A9C', '2804111XKN61AC3', '2804111XKN61AH4',
+    '2804112XKN61A8T', '2804112XKN61A9C', '2804112XKN61AC3', '2804112XKN61AH4',
 }
 
 # ── Переопределение размеров упаковки (замечания Корнеевой, Замечания-3) ──
@@ -309,6 +326,15 @@ ECOTEXIS_SUPPLIER   = 'Ecotexis'
 SMC_SUPPLIER        = 'SMC'
 PUREM_SUPPLIER      = 'Purem'
 SMC_MAX_PALLETS_PER_TRUCK = 7
+# ── MSA: фура = 21 контейнер (3 яруса × 7 рядов). 1 контейнер бампера = 1 упаковка.
+#    Накладки порога занимают тарные места: перед. набор 960 шт = 3 места (320 шт/место),
+#    задн. набор 360 шт = 3 места (120 шт/место). 21 — это МАКСИМУМ. ──
+MSA_SUPPLIER = 'MSA'
+MSA_MAX_CONTAINERS_PER_TRUCK = 21
+MSA_FRONT_TRIM_CODES = {'5402411XKN02B', '5402422XKN02B'}
+MSA_REAR_TRIM_CODES  = {'5402433XKN02A', '5402444XKN02A'}
+MSA_FRONT_TRIM_PCS_PER_SLOT = 320   # 960 шт / 3 тарных места
+MSA_REAR_TRIM_PCS_PER_SLOT  = 120   # 360 шт / 3 тарных места
 SMC_WEEKDAY         = 0   # понедельник
 PUREM_WEEKDAY       = 0
 ECOTEXIS_ORDER_LAG_DAYS = 35
@@ -734,9 +760,9 @@ def resolve_plan_tabs(plan_tab_str):
 SAFETY_DAYS=7
 SAFETY_DAYS_FILE = os.path.join(ROOT, "Stock in days.xlsx")  # Per-part safety stock file
 # Минимальная доля дневной потребности, которая должна быть перекрыта остатком
-# на НАЧАЛО дня. Поставка ставится в ПРЕДЫДУЩИЙ день (а не в день спроса),
-# чтобы к началу дня спроса остаток уже покрывал ≥ этой доли — без отрицательных
-# остатков на начало дня.
+# на НАЧАЛО дня. Поставка ставится в ПРЕДЫДУЩИЙ день (рассчитывается под спрос
+# следующего дня), чтобы к началу дня спроса остаток уже покрывал ≥ этой доли —
+# без отрицательных остатков на начало дня.
 DELIVERY_START_COVER = 0.5
 
 def build_weeks():
@@ -1439,7 +1465,21 @@ bom_sections = {}
 bom_ordered_codes = []
 BOM_COL_OFFSET = 0
 
-if os.path.exists(OUT):
+# LIVE MODE (применяемость из BOM_Детальный прошлого вывода) — ТОЛЬКО если
+# вывод не старше Master BOM. Если Master BOM обновлён позже последнего запуска,
+# берём применяемость из Master BOM, иначе обновление применяемости игнорируется.
+_master_for_live = BOM_NEW if os.path.exists(BOM_NEW) else BOM_FILE
+_live_is_fresh = True
+try:
+    if (_master_for_live and os.path.exists(_master_for_live)
+            and os.path.getmtime(_master_for_live) > os.path.getmtime(OUT) + 1):
+        _live_is_fresh = False
+except OSError:
+    pass
+if os.path.exists(OUT) and not _live_is_fresh:
+    print(f"\n  ℹ️  Master BOM ({os.path.basename(_master_for_live)}) новее вывода "
+          f"({os.path.basename(OUT)}) — применяемость берётся из Master BOM (LIVE пропущен)")
+if os.path.exists(OUT) and _live_is_fresh:
     try:
         _live = load_bom_from_live_output(OUT)
         if _live:
@@ -2007,6 +2047,8 @@ def _configs_nonempty(code):
 
 def has_mrp_applicability(code):
     """Деталь участвует в потребности, заказах, поставках и риске дефицита."""
+    if code in REFERENCE_ONLY_CODES:
+        return False  # справочные коды — без расчёта потребности/заказов/графика
     if code in chem_norms or code in color_filtered_paints:
         return True
     if code in ADDL:
@@ -2018,6 +2060,68 @@ def has_mrp_applicability(code):
     if code in bumper_meta:
         return True
     return False
+
+# ── Применяемость (модель + конфигурация) для колонки B потребностей/заказов/графиков ──
+_CFG_ORDER = {'comfort': 0, 'elite': 1, 'premium': 2, 'TechPlus': 3}
+def _applicability_str(code):
+    """Строка применяемости вида 'B02: elite, premium, TechPlus; B04: premium, TechPlus'.
+    Берётся из BOM_Детальный (configs); привод (2WD/4WD) опускается — только модель+конфиг."""
+    cfgs = bom.get(code, {}).get('configs', {})
+    keys = list(cfgs.keys()) if isinstance(cfgs, dict) else list(cfgs or [])
+    if not keys and code in ADDL:
+        _a = ADDL[code]
+        _m = _a.get('models', []) or []
+        _c = sorted(_a.get('configs', set()) or [])
+        if _m and _c:
+            return '; '.join(f"{m}: {', '.join(_c)}" for m in _m)
+        return ', '.join(_m) if _m else ''
+    if not keys:
+        return ''
+    by_model = {}
+    for k in keys:
+        parts = str(k).split('_')
+        if len(parts) >= 3:
+            model, cfg = parts[0], parts[2]
+        elif len(parts) == 2:
+            model, cfg = parts[0], parts[1]
+        else:
+            model, cfg = k, ''
+        by_model.setdefault(model, set()).add(cfg)
+    out = []
+    for m in sorted(by_model):
+        cs = sorted((c for c in by_model[m] if c), key=lambda c: _CFG_ORDER.get(c, 9))
+        out.append(f"{m}: {', '.join(cs)}" if cs else m)
+    return '; '.join(out)
+
+_COLOR_DISPLAY = {
+    'GOLDEN_BLACK': 'Golden Black', 'WHITE_C1': 'White C1', 'C3_GREY': 'C3 Grey',
+    'ATLANTIS': 'Atlantis', 'BLUE_5B': 'Blue 5B', 'GN_RED': 'GN Red',
+    'AYERS_GREY': 'Ayers Grey', 'KU_GREY': 'KU Grey', 'ORANGE': 'Orange',
+    'FU_GREY': 'FU Grey', 'CRYSTAL_BLACK': 'Crystal Black', 'SWAROVSKI': 'Swarovski',
+    '9E_WHITE': '9E White',
+}
+def _color_str(code):
+    """Цвет детали: бамперы — из bumper_clr_map; краски — из paint_colors."""
+    if code in bumper_meta:
+        ck = bumper_meta[code].get('color_key', '') or ''
+        return _COLOR_DISPLAY.get(ck, ck.replace('_', ' ')) if ck else ''
+    pc = paint_colors.get(code)
+    if isinstance(pc, list) and pc:
+        return ', '.join(_COLOR_DISPLAY.get(c, c.replace('_', ' ')) for c in pc)
+    return ''
+
+def _name_with_appl(code, name):
+    """Колонка B: 'Наименование | модель: конфигурация | цвет' (без сдвига колонок)."""
+    appl = _applicability_str(code)
+    color = _color_str(code)
+    tail = []
+    if appl:
+        tail.append(appl)
+    if color:
+        tail.append(f"цвет: {color}")
+    if tail:
+        return f"{str(name or '')[:38]} | {' | '.join(tail)}"[:150]
+    return str(name or '')[:50]
 
 mrp_codes = [c for c in all_codes if has_mrp_applicability(c)]
 _bom_no_appl = [c for c in all_codes if c in bom and not _configs_nonempty(c)]
@@ -2249,6 +2353,55 @@ if os.path.exists(PAINT_STATS):
         print(f"  ⚠️  Paint stats не загружен: {e}")
 else:
     print(f"  ⚠️  Файл не найден: {PAINT_STATS}")
+
+# ── НАДЁЖНОСТЬ: если файл статистики не загрузился (повреждён/занят Excel/
+#    OneDrive) или оказался пуст — строим цветовую карту НАПРЯМУЮ из GWM-файла
+#    в памяти. Иначе все бамперы и цветные краски молча считались бы как 0,
+#    и партии плана (напр. RAS2212) выпадали бы из потребности. ──
+if not batch_color and _GWM_INPUT and os.path.exists(_GWM_INPUT):
+    print("  ⚠️  batch_color пуст — восстанавливаю цвета напрямую из GWM-файла...")
+    try:
+        import importlib.util as _ilu_fb
+        _bp_fb = os.path.join(ROOT, "build_order_calc_v2.py")
+        _sp_fb = _ilu_fb.spec_from_file_location("build_order_calc_v2_fb", _bp_fb)
+        _bm_fb = _ilu_fb.module_from_spec(_sp_fb)
+        _sp_fb.loader.exec_module(_bm_fb)
+        _raw_fb = _bm_fb.build_batch_color_map(_GWM_INPUT)
+        _col2key_fb = {v: k for k, v in PAINT_COL_MAP.items()}
+        for _b_fb, _cd_fb in _raw_fb.items():
+            _norm_fb = {_col2key_fb[_c]: _q for _c, _q in _cd_fb.items() if _c in _col2key_fb}
+            if _norm_fb:
+                batch_color[_normalize_batch_id(_b_fb)] = _norm_fb
+        print(f"  ♻️  Цвета восстановлены из GWM напрямую: {len(batch_color)} партий")
+    except Exception as _e_fb:
+        print(f"  ❌  Не удалось восстановить цвета из GWM: {_e_fb}")
+        print("      ВНИМАНИЕ: потребность по бамперам/цветным краскам будет НЕВЕРНОЙ (0).")
+
+# ── ДИАГНОСТИКА: партии плана без цветовых данных. Такие партии молча выпадают
+#    из потребности по бамперам и цветным краскам (как сообщалось по RAS2212).
+#    Печатаем список, чтобы ошибки были видны для ВСЕХ расчётов. ──
+def _audit_plan_batches_without_color():
+    _seen = set(); _miss = []
+    for _tab in plan_batches:
+        for _mn in plan_batches[_tab]:
+            for _bv, _dq in plan_batches[_tab][_mn].items():
+                if _bv in _seen:
+                    continue
+                _seen.add(_bv)
+                _cars = sum(_dq.values())
+                if _cars <= 0:
+                    continue
+                if not _batch_color_lookup(_bv):
+                    _bi = _get_batch_info(_tab, _bv)
+                    _miss.append((_bv, _bi.get('model', ''), _bi.get('config', ''), _cars))
+    if _miss:
+        print(f"  ⚠️  Партии плана БЕЗ цветовых данных (выпадают из бамперов/красок): {len(_miss)}")
+        for _x in sorted(_miss, key=lambda t: -t[3])[:30]:
+            print(f"       {_x[0]:14s} {_x[1]:4s} {_x[2]:10s} cars={_x[3]:.0f}")
+        print("      → проверьте, что эти партии есть в GWM-файле 各车型成套批次统计表.")
+    else:
+        print("  ✅ Все партии плана имеют цветовые данные (ничего не выпадает).")
+# (вызов _audit_plan_batches_without_color() — ниже, после _batch_color_lookup)
 
 # ═══ STEP 6: Demand (V7 logic) ════════════════════════════════
 def _unique_batches_for_tabs(month_num, tabs):
@@ -2571,6 +2724,11 @@ def get_daily_demand(code, month_num):
     return daily
 
 # ═══ STEP 7: Pre-compute demand ═══════════════════════════════
+try:
+    _audit_plan_batches_without_color()
+except Exception as _e_audit:
+    print(f"  ⚠️  Аудит партий не выполнен: {_e_audit}")
+
 print("\nPre-computing demand...")
 demand={}
 for code in mrp_codes:
@@ -2674,6 +2832,42 @@ def get_norm_str(code):
         ai=ADDL[code]; return f"Доп: {','.join(ai['models'][:3])}"
     return '—'
 
+# ── Страховой запас MSA-бамперов: 1 полная партия, разбитая по цветам кузовов ──
+MSA_BUMPER_BATCH = 120  # размер 1 производственной партии (кузовов)
+_BUMPER_COLOR_SUFFIX = ('A8T', 'A9C', 'AC3', 'AH4', 'A5B', 'AGN')
+def _bumper_type_key(code):
+    """Группа цветовых вариантов одного физического бампера (без цветового суффикса)."""
+    for _suf in _BUMPER_COLOR_SUFFIX:
+        if code.endswith(_suf):
+            return code[:-len(_suf)]
+    return code
+def _is_msa_bumper(code):
+    return (code in bumper_meta and code not in REFERENCE_ONLY_CODES
+            and normalize_supplier(bom.get(code, {}).get('supplier', '')) == 'MSA')
+_msa_type_demand_cache = {}
+def _code_3m_demand(code):
+    return sum(sum(demand.get(code, {}).get(mn, {}).values()) for mn, _, _ in MONTHS)
+def _safety_qty(code, supplier=''):
+    """Страховой запас (шт). MSA-бамперы: 1 партия (MSA_BUMPER_BATCH), разбитая
+    по цветам пропорционально их доле в партиях (∑ по цветам вида = 1 партия).
+    Остальные детали: avg_daily × дни страх.запаса."""
+    if _is_msa_bumper(code):
+        if not _msa_type_demand_cache:
+            for _c in bumper_meta:
+                if _is_msa_bumper(_c):
+                    _t = _bumper_type_key(_c)
+                    _msa_type_demand_cache[_t] = _msa_type_demand_cache.get(_t, 0) + _code_3m_demand(_c)
+        _t = _bumper_type_key(code)
+        _td = _msa_type_demand_cache.get(_t, 0)
+        if _td > 0:
+            return round(MSA_BUMPER_BATCH * _code_3m_demand(code) / _td, 2)
+        return 0.0
+    _sd = get_safety_days(code, supplier)
+    _tot = _code_3m_demand(code)
+    _n3 = sum(nd for _, _, nd in MONTHS)
+    _avg = _tot / _n3 if _n3 else 0
+    return round(_avg * _sd, 2)
+
 def calc_order(code, month_num, stock_override=None):
     """Расчёт заказа на месяц.
     Использует дату актуальности остатков из stock_date_map (per-code).
@@ -2701,7 +2895,7 @@ def calc_order(code, month_num, stock_override=None):
     d_total_3m = sum(sum(demand[code].get(mn, {}).values()) for mn, _, _ in MONTHS)
     n_days_total = sum(nd for _, _, nd in MONTHS)
     avg_daily = d_total_3m / n_days_total if n_days_total else 0
-    safety = avg_daily * SAFETY_DAYS
+    safety = _safety_qty(code, bom.get(code, {}).get('supplier', ''))
     stk = stock_override if stock_override is not None else stock.get(code, 0)
     net = max(0, d_future + safety - stk)
     pkg = max(1, bom.get(code, {}).get('package', 1))
@@ -2785,11 +2979,7 @@ def _delivery_series_demand(code):
     ]
 
 def _delivery_safety_qty(code, supplier):
-    sd = get_safety_days(code, supplier)
-    total_3m = sum(sum(demand[code].get(mn, {}).values()) for mn, _, _ in MONTHS)
-    n_days_3m = sum(nd for _, _, nd in MONTHS)
-    avg_daily = total_3m / n_days_3m if n_days_3m else 0
-    return round(avg_daily * sd, 4)
+    return _safety_qty(code, supplier)
 
 def _delivery_mode(supplier):
     s = normalize_supplier(supplier)
@@ -2899,6 +3089,7 @@ def _build_initial_deliveries(code, supplier):
         # Поставка ставится в ТЕКУЩИЙ день, но рассчитывается под СЛЕДУЮЩИЙ:
         # остаток на конец дня (= начало следующего дня) должен быть не ниже
         # страхового запаса и не ниже DELIVERY_START_COVER от потребности след. дня.
+        # Так на НАЧАЛО дня спроса остаток уже перекрывает ≥50% и не уходит в минус.
         dem_next = dems[di + 1] if di + 1 < n else 0.0
         target = max(safety, math.ceil(DELIVERY_START_COVER * dem_next))
         proj = ss_prev - dem_d                      # конец дня до поставки
@@ -2915,23 +3106,212 @@ def _ss_after_day(ss_prev, dem_d, del_d, code, dt):
     return ss_prev - dem_d + del_d
 
 def _recompute_ss_from_deliveries(code, dels):
+    """Остаток на конец дня = остаток пред.дня − спрос + поставка этого дня.
+    Поставка del[di] рассчитана под спрос СЛЕДУЮЩЕГО дня (см. _build_initial_deliveries),
+    поэтому остаток на конец дня (= начало следующего дня) перекрывает ≥50% спроса
+    след. дня и не уходит в минус на начало дня."""
     dems = _delivery_series_demand(code)
     ss_prev = float(stock.get(code, 0))
     pairs = []
     for di, dem_d in enumerate(dems):
         dt = all_dates[di][0]
-        del_d = dels[di]
-        ss_d = _ss_after_day(ss_prev, dem_d, del_d, code, dt)
-        pairs.append((del_d, ss_d))
+        ss_d = _ss_after_day(ss_prev, dem_d, dels[di], code, dt)
+        pairs.append((dels[di], ss_d))
         ss_prev = ss_d
     return pairs
+
+def _msa_container_slots(raw_qty):
+    """Тарные места (контейнеры) для дневной отгрузки MSA:
+    бамперы — по упаковкам (1 упаковка = 1 контейнер); накладки — по нормам мест."""
+    bumper_slots = 0
+    front_pcs = 0.0
+    rear_pcs = 0.0
+    for c, q in raw_qty.items():
+        if q <= 0:
+            continue
+        if c in MSA_FRONT_TRIM_CODES:
+            front_pcs += q
+        elif c in MSA_REAR_TRIM_CODES:
+            rear_pcs += q
+        else:
+            pkg = max(1, bom.get(c, {}).get('package', 1))
+            bumper_slots += math.ceil(q / pkg)
+    front_slots = math.ceil(front_pcs / MSA_FRONT_TRIM_PCS_PER_SLOT) if front_pcs > 0 else 0
+    rear_slots  = math.ceil(rear_pcs / MSA_REAR_TRIM_PCS_PER_SLOT) if rear_pcs > 0 else 0
+    return bumper_slots, front_slots, rear_slots
+
+def _cap_msa_day_deliveries(raw_qty):
+    """Ограничение фуры MSA: ≤ 21 контейнер/день. Накладки сохраняются (резервируют
+    места), бамперы при нехватке мест уменьшаются (избыток уходит в переходящий запас)."""
+    if not raw_qty:
+        return raw_qty
+    bs, fs, rs = _msa_container_slots(raw_qty)
+    if bs + fs + rs <= MSA_MAX_CONTAINERS_PER_TRUCK:
+        return raw_qty
+    avail = max(0, MSA_MAX_CONTAINERS_PER_TRUCK - (fs + rs))
+    if bs <= 0:
+        return raw_qty  # только накладки — бамперы не уменьшить
+    scale = avail / bs
+    out = {}
+    for c, q in raw_qty.items():
+        if c in MSA_FRONT_TRIM_CODES or c in MSA_REAR_TRIM_CODES:
+            out[c] = q
+        else:
+            pkg = max(1, bom.get(c, {}).get('package', 1))
+            cont = int(math.floor((q / pkg) * scale))
+            out[c] = cont * pkg
+    return out
+
+# ── Переходящий запас комплектно: пары передний↔задний (модель/конфиг/цвет) ──
+# Поставки пары планируются ВМЕСТЕ, чтобы остаток переднего ≈ остатку заднего.
+_MSA_PAIR_PREFIX = [
+    ('2803120XST33', '2804104AST33'),   # A01 comfort/elite/premium
+    ('2803130XST33', '2804105AST33'),   # A01 Tech Plus
+    ('2803104XKN61', '2804KN260004'),   # B02 elite
+    ('2803105XKN61', '2804KN260005'),   # B02/B04 premium/TechPlus
+]
+def _msa_pairs():
+    out = []
+    for _fp, _rp in _MSA_PAIR_PREFIX:
+        for _suf in _BUMPER_COLOR_SUFFIX:
+            _f, _r = _fp + _suf, _rp + _suf
+            if _f in bom and _r in bom:
+                out.append((_f, _r))
+    return out
+
+def _build_paired_deliveries(fcode, rcode, fsupp, rsupp):
+    """Совместный график поставок пары: доставляем обе стороны в один день,
+    каждую до её страхового запаса, чтобы переходящий остаток был комплектным."""
+    dems_f = _delivery_series_demand(fcode)
+    dems_r = _delivery_series_demand(rcode)
+    pkg_f = max(1, bom.get(fcode, {}).get('package', 1))
+    pkg_r = max(1, bom.get(rcode, {}).get('package', 1))
+    saf_f = _delivery_safety_qty(fcode, fsupp)
+    saf_r = _delivery_safety_qty(rcode, rsupp)
+    n = len(dems_f)
+    dels_f = [0.0] * n
+    dels_r = [0.0] * n
+    ss_f = float(stock.get(fcode, 0))
+    ss_r = float(stock.get(rcode, 0))
+    for di in range(n):
+        dt = all_dates[di][0]
+        demf, demr = dems_f[di], dems_r[di]
+        projf, projr = ss_f - demf, ss_r - demr
+        trigger = ((demf > 0 and projf < saf_f) or (demr > 0 and projr < saf_r))
+        if trigger:
+            df = _ceiling_pkg_qty(max(0, saf_f - projf), pkg_f)
+            dr = _ceiling_pkg_qty(max(0, saf_r - projr), pkg_r)
+            if df <= 0:
+                df = float(pkg_f)
+            if dr <= 0:
+                dr = float(pkg_r)
+            dels_f[di] = df
+            dels_r[di] = dr
+        ss_f = _ss_after_day(ss_f, demf, dels_f[di], fcode, dt)
+        ss_r = _ss_after_day(ss_r, demr, dels_r[di], rcode, dt)
+    return dels_f, dels_r
+
+def _smooth_msa_trucks(all_dels, msa_codes):
+    """Фура ≤ 21 контейнер/день. Избыток переносим ТОЛЬКО на более ранний рабочий день
+    С ПОТРЕБНОСТЬЮ у этой же детали (не на пустые дни). Если такого дня нет — объём
+    остаётся на дне потребности (фура может превысить 21, но поставок в пустые дни нет).
+    Перенос только назад по времени → отрицательных остатков не возникает."""
+    n = len(all_dates)
+    CAP = MSA_MAX_CONTAINERS_PER_TRUCK
+    bumpers = [c for c in msa_codes
+               if c not in MSA_FRONT_TRIM_CODES and c not in MSA_REAR_TRIM_CODES]
+    pkgs = {c: max(1, bom.get(c, {}).get('package', 1)) for c in bumpers}
+    demday = {c: [d > 0 for d in _delivery_series_demand(c)] for c in bumpers}
+    trim = [0] * n
+    for di in range(n):
+        fp = sum(all_dels[c][di] for c in MSA_FRONT_TRIM_CODES if c in all_dels)
+        rp = sum(all_dels[c][di] for c in MSA_REAR_TRIM_CODES if c in all_dels)
+        trim[di] = ((math.ceil(fp / MSA_FRONT_TRIM_PCS_PER_SLOT) if fp > 0 else 0)
+                    + (math.ceil(rp / MSA_REAR_TRIM_PCS_PER_SLOT) if rp > 0 else 0))
+    load = [trim[di] + sum(int(round(all_dels[c][di] / pkgs[c])) for c in bumpers)
+            for di in range(n)]
+    for di in range(n - 1, -1, -1):
+        guard = 0
+        while load[di] > CAP and guard < 100000:
+            guard += 1
+            moved = False
+            for c in bumpers:
+                if all_dels[c][di] < pkgs[c]:
+                    continue
+                dj = -1
+                for k in range(di - 1, -1, -1):
+                    if load[k] < CAP and demday[c][k]:
+                        dj = k
+                        break
+                if dj >= 0:
+                    all_dels[c][di] -= pkgs[c]
+                    all_dels[c][dj] += pkgs[c]
+                    load[di] -= 1
+                    load[dj] += 1
+                    moved = True
+                    break
+            if not moved:
+                break
+
+def _build_ahead_deliveries(code, supplier):
+    """ПРЕДЗАВОЗ: поставка приходит в конце предыдущего рабочего дня (дня потребности),
+    поэтому на НАЧАЛО дня потребности остаток уже покрывает спрос (≥100%, минимум 50%) —
+    отрицательных остатков внутри дня нет. del[d] на рабочем дне d закрывает СЛЕДУЮЩИЙ
+    рабочий день. Цель конца дня = страх.запас + спрос следующего дня потребности.
+    (Пары передний↔задний согласуются сами: одинаковый спрос → одни дни поставок.)"""
+    dems = _delivery_series_demand(code)
+    pkg = max(1, bom.get(code, {}).get('package', 1))
+    safety = _delivery_safety_qty(code, supplier)
+    n = len(dems)
+    dels = [0.0] * n
+    arrival = [0.0] * n          # отгрузка, ПРИХОДЯЩАЯ в этот день (с пред. рабочего дня)
+    nxt_wd = [None] * n
+    _nd = None
+    for di in range(n - 1, -1, -1):
+        nxt_wd[di] = _nd
+        if dems[di] > 0:
+            _nd = di
+    _first_wd = next((di for di in range(n) if dems[di] > 0), None)
+    ss = float(stock.get(code, 0))
+    # Деталь производится в 1-й день горизонта: предыдущего дня нет → считаем, что предзавоз
+    # был до горизонта (начальный остаток покрывает 1-й день), иначе день 0 уходит в минус.
+    if _first_wd == 0:
+        ss = max(ss, safety + dems[0])
+    for di in range(n):
+        dt = all_dates[di][0]
+        _snap = manual_stock_by_date.get(code, {}).get(dt)
+        if _snap is not None:
+            ss = float(_snap)
+        else:
+            ss = ss - dems[di] + arrival[di]
+        # СТАРТОВАЯ поставка: на день перед первым днём потребности (приходит в первый день),
+        # т.к. предыдущего дня потребности в горизонте нет — иначе первый день уходит в минус.
+        if _first_wd is not None and _first_wd > 0 and di == _first_wd - 1:
+            _d0 = _ceiling_pkg_qty(max(0, safety + dems[_first_wd] - ss), pkg)
+            if _d0 > 0:
+                dels[di] += _d0
+                arrival[_first_wd] += _d0
+        if dems[di] > 0:
+            # отгрузка этого рабочего дня ПРИХОДИТ на следующий рабочий день и закрывает его
+            _nw = nxt_wd[di]
+            _target = (safety + dems[_nw]) if _nw is not None else safety
+            _d = _ceiling_pkg_qty(max(0, _target - ss), pkg)
+            if _d > 0:
+                dels[di] += _d
+                if _nw is not None:
+                    arrival[_nw] += _d
+    return dels
 
 def build_all_delivery_schedules():
     all_dels = {}
     for code in mrp_codes:
         _, supp, _ = get_info(code)
+        # Единая модель для всех: поставка дня D рассчитана под спрос дня D+1
+        # (приходит заранее) → на начало дня спроса остаток ≥50% и не уходит в минус.
         all_dels[code] = _build_initial_deliveries(code, supp)
 
+    # Пары передний↔задний согласуются автоматически (одинаковый спрос → одни дни
+    # поставок и близкие объёмы) — комплектный переходящий запас сохраняется.
     smc_codes = [c for c in mrp_codes if _delivery_mode(get_info(c)[1]) == 'smc_weekly']
     for di in _weekday_delivery_indices(SMC_WEEKDAY):
         raw = {c: all_dels[c][di] for c in smc_codes if all_dels[c][di] > 0}
@@ -2940,6 +3320,13 @@ def build_all_delivery_schedules():
         capped = _cap_smc_day_deliveries(raw)
         for c, q in capped.items():
             all_dels[c][di] = q
+
+    # ── MSA: фура ≤ 21 контейнер/день — избыток переносим на ранние дни (предзавоз),
+    #    объём не теряем → потребность покрыта, отрицательных остатков нет ──
+    msa_codes = [c for c in mrp_codes
+                 if normalize_supplier(get_info(c)[1]) == MSA_SUPPLIER]
+    if msa_codes:
+        _smooth_msa_trucks(all_dels, msa_codes)
 
     schedules = {}
     for code in mrp_codes:
@@ -2955,6 +3342,7 @@ print("  Расчёт графиков поставок (Ecoal'yance / Ecotexis 
 DELIVERY_SCHEDULES = build_all_delivery_schedules()
 _n_smc = sum(1 for c in mrp_codes if _delivery_mode(get_info(c)[1]) == 'smc_weekly')
 print(f"    Расписаний: {len(DELIVERY_SCHEDULES)} | SMC позиций: {_n_smc} | лимит фуры: {SMC_MAX_PALLETS_PER_TRUCK} палл.")
+
 
 # ── Упаковка (редактируемый) ────────────────────────────────
 print("  Упаковка (редактируемый)...")
@@ -2976,7 +3364,7 @@ for ci, w in enumerate(pkg_col_w, 1):
     ws_pkg.column_dimensions[get_column_letter(ci)].width = w
 ws_pkg.row_dimensions[2].height = 30
 
-for ci, h in enumerate(['Код', 'Наименование', 'Уп. (шт) ← РЕДАКТИРОВАТЬ', 'Ед.', 'Поставщик', 'Примечание'], 1):
+for ci, h in enumerate(['Код', 'Наименование / Применяемость / Цвет', 'Уп. (шт) ← РЕДАКТИРОВАТЬ', 'Ед.', 'Поставщик', 'Примечание'], 1):
     hcell(ws_pkg, 2, ci, h, H_FILL)
 
 # DataValidation: только целые числа >= 1
@@ -3006,7 +3394,7 @@ for code in all_codes:
     if fb: c.fill = fb
 
     # Col B: name
-    c = ws_pkg.cell(pkg_row, 2); c.value = name[:60]
+    c = ws_pkg.cell(pkg_row, 2); c.value = _name_with_appl(code, name)
     c.font = Font(size=9, name="Arial"); c.alignment = Alignment(horizontal='left', vertical='center')
     if fb: c.fill = fb
 
@@ -3060,8 +3448,8 @@ ws_man.row_dimensions[1].height = 40
 ws_man.row_dimensions[2].height = 16
 ws_man.row_dimensions[_MAN_STOCK_HDR_ROW].height = 20
 
-_MAN_FIX_H = ['Код детали', 'Наименование', 'Поставщик', 'Ед.', 'Остаток\n(нач.мес.)\n✏️']
-_MAN_FIX_W = [22, 44, 16, 6, 18]
+_MAN_FIX_H = ['Код детали', 'Наименование / Применяемость / Цвет', 'Поставщик', 'Ед.', 'Остаток\n(нач.мес.)\n✏️']
+_MAN_FIX_W = [22, 60, 16, 6, 18]
 for ci, (h, w) in enumerate(zip(_MAN_FIX_H, _MAN_FIX_W), 1):
     hcell(ws_man, 2, ci, h, H_FILL if ci != _MAN_STOCK_OPEN_COL else fill("B8860B"))
     hcell(ws_man, _MAN_STOCK_HDR_ROW, ci, h, H_FILL if ci != _MAN_STOCK_OPEN_COL else fill("B8860B"))
@@ -3115,7 +3503,7 @@ for ri, code in enumerate(all_codes, _MAN_STOCK_DATA_START):
     name, supp, unit = get_info(code)
     stk = stock.get(code, 0)
     snaps = manual_stock_by_date.get(code, {})
-    for ci, v in enumerate([code, name[:50], supp, unit, stk], 1):
+    for ci, v in enumerate([code, _name_with_appl(code,name), supp, unit, stk], 1):
         c = ws_man.cell(ri, ci); c.value = v
         c.font = Font(size=9, name="Arial")
         c.alignment = Alignment(horizontal='left' if ci <= 2 else 'center', vertical='center')
@@ -3140,15 +3528,15 @@ for ri, code in enumerate(all_codes, _MAN_STOCK_DATA_START):
 #   Del-col = 8 + di*2 + 1   (📦 поставка — только если есть спрос в этот день)
 _gp_last_mon_col = {}  # mnum -> (col_letter, col_num) Ss-колонки последнего дня месяца
 for _di, (_dt, _mn, _d) in enumerate(all_dates):
-    _cn = 8 + _di * 2
+    _cn = 8 + _di * 3
     _gp_last_mon_col[_mn] = (get_column_letter(_cn), _cn)
 # После цикла: _gp_last_mon_col[5] = Ss последнего дня мая (May 31)
 # Для июля: используем Потребность_Jun col I (Дефицит = остаток после июньского спроса)
 
 # ── Потребность_May/Jun/Jul ───────────────────────────────────
-FH=['Код детали','Наименование','Поставщик','Ед.','Вкладка плана',
+FH=['Код детали','Наименование / Применяемость / Цвет','Поставщик','Ед.','Вкладка плана',
     'Тип / норма','Остаток','Потребность','Дефицит']
-FW=[22,42,16,6,22,30,10,14,12]
+FW=[22,60,16,6,22,30,10,14,12]
 for mi,(mnum,mlabel,n_days) in enumerate(MONTHS):
     sname=f"Потребность_{mlabel[:3]}"
     print(f"  {sname}...")
@@ -3168,7 +3556,7 @@ for mi,(mnum,mlabel,n_days) in enumerate(MONTHS):
         name,supp,unit=get_info(code)
         daily=demand[code].get(mnum,{}); mtotal=sum(daily.values())
         stk=stock.get(code,0); tab=part_tab_map.get(code,'—'); norm_str=get_norm_str(code)
-        vals=[code,name[:50],supp,unit,tab,norm_str,stk,
+        vals=[code,_name_with_appl(code,name),supp,unit,tab,norm_str,stk,
               round(mtotal, 2), None]
         for ci,v in enumerate(vals,1):
             c=ws.cell(ri,ci); c.value=v
@@ -3262,11 +3650,11 @@ for _code in CHEM_CODES:
 
 _m0, _m0lbl, _ = MONTHS[0]; _m1, _m1lbl, _ = MONTHS[1]; _m2, _m2lbl, _ = MONTHS[2]
 _ms0 = MONTH_SHORT[_m0]; _ms1 = MONTH_SHORT[_m1]; _ms2 = MONTH_SHORT[_m2]
-NRM_HDR = ['Код','Наименование','Ед.','Поставщик',
+NRM_HDR = ['Код','Наименование / Применяемость / Цвет','Ед.','Поставщик',
            f'Норма\n{_ms0}\n(ред.)',f'Норма\n{_ms1}\n(ред.)',f'Норма\n{_ms2}\n(ред.)',
            f'Авт_{_ms0}\n(полн)',f'Авт_{_ms0}\n(ост.)',
            f'Авт_{_ms1}',f'Авт_{_ms2}']
-NRM_W   = [22, 44, 6, 18, 10, 10, 10, 10, 10, 10, 10]
+NRM_W   = [22, 60, 6, 18, 10, 10, 10, 10, 10, 10, 10]
 ws_n = wb_out.create_sheet('Нормы_Расхода')
 ws_n.freeze_panes = 'E3'; ws_n.row_dimensions[1].height = 40; ws_n.row_dimensions[2].height = 40
 _t = ws_n.cell(1, 1)
@@ -3285,7 +3673,7 @@ for ri, _code in enumerate(CHEM_CODES, 3):
     _fb = GRY_F if ri % 2 == 0 else NO_F
     _nr = norms_rows[_code]
     _m0n, _m1n, _m2n = MONTHS[0][0], MONTHS[1][0], MONTHS[2][0]
-    _vals = [_code, _name[:50], _unit, _supp,
+    _vals = [_code, _name_with_appl(_code,_name), _unit, _supp,
              _nr[f'norm_{_m0n}'], _nr[f'norm_{_m1n}'], _nr[f'norm_{_m2n}'],
              _nr[f'cars_{_m0n}'], _nr.get('cars_may_fut', _nr[f'cars_{_m0n}']),
              _nr[f'cars_{_m1n}'], _nr[f'cars_{_m2n}']]
@@ -3313,10 +3701,10 @@ for mi_ord,(mnum,mlabel,n_days) in enumerate(MONTHS):
     oname=f"Заказы_{mlabel[:3]}"; print(f"  {oname}...")
     ws_o=wb_out.create_sheet(oname)
     ws_o.freeze_panes='J3'; ws_o.row_dimensions[1].height=50
-    oh=['Код','Наименование','Поставщик','Ед.','Уп.\n(шт)','Остаток',
+    oh=['Код','Наименование / Применяемость / Цвет','Поставщик','Ед.','Уп.\n(шт)','Остаток',
         f'Потребн.\n{mlabel[:3]}','Страх.\nзапас','Чистая\nпотребн.',
         'Кол-во\nупаковок','ЗАКАЗ\n(итого)','Статус']
-    ow=[22,42,16,6,7,10,14,12,14,10,14,18]
+    ow=[22,60,16,6,7,10,14,12,14,10,14,18]
     for ci,(h,w) in enumerate(zip(oh,ow),1):
         hcell(ws_o,1,ci,h,H_FILL); ws_o.column_dimensions[get_column_letter(ci)].width=w
     ws_o.cell(2,1).value=f"Заказ=CEILING((Потребность+Страх_запас-Остаток)/Упаковка)×Упаковка | Страховой запас={SAFETY_DAYS} дн."
@@ -3335,7 +3723,7 @@ for mi_ord,(mnum,mlabel,n_days) in enumerate(MONTHS):
         elif oq==0: st='✅ Достаточно'
         elif stk==0: st='🔴 НЕТ ОСТАТКА'
         else: st='📦 Заказ'
-        vals=[code,name[:50],supp,unit,pkg,stk,dem,saf,net,pkgs,oq,st]
+        vals=[code,_name_with_appl(code,name),supp,unit,pkg,stk,dem,saf,net,pkgs,oq,st]
         fmts=[None,None,None,None,'#,##0','#,##0.#','#,##0.#','#,##0.#','#,##0.#','#,##0','#,##0.#',None]
         for ci,(v,fmt) in enumerate(zip(vals,fmts),1):
             c=ws_o.cell(ri,ci); c.value=v
@@ -3525,7 +3913,7 @@ ws_g.row_dimensions[2].height = 16
 ws_g.row_dimensions[3].height = 20
 
 _n_day_cols_gp = len(all_dates)           # 92 дня
-_total_cols_gp = 7 + _n_day_cols_gp * 2  # 7 fix + 2*92 = 191
+_total_cols_gp = 7 + _n_day_cols_gp * 3  # 7 fix + 3*92 (остаток|потребность|поставка)
 _POTREB_DAY_COL_START = len(FH)         # 9 фикс. колонок → день 1 = col 10
 
 def _gp_demand_ref(gp_ri, mnum, day_d):
@@ -3537,10 +3925,13 @@ def _gp_demand_ref(gp_ri, mnum, day_d):
     return f"IF(ISBLANK({cell}),0,{cell})"
 
 def _gp_ci_ss(di):
-    return 8 + di * 2
+    return 8 + di * 3
+
+def _gp_ci_dem(di):
+    return 8 + di * 3 + 1
 
 def _gp_ci_del(di):
-    return 8 + di * 2 + 1
+    return 8 + di * 3 + 2
 
 def _gp_prev_ss_ref(gp_ri, di):
     if di == 0:
@@ -3550,7 +3941,8 @@ def _gp_prev_ss_ref(gp_ri, di):
 def _gp_del_formula(gp_ri, di):
     """Поставка дня D рассчитывается под спрос дня D+1 (приходит заранее).
     Цель на конец дня D (= начало D+1): не ниже страхового запаса (F) и не ниже
-    DELIVERY_START_COVER от спроса дня D+1 → на начало дня спроса остаток ≥50%, без минуса."""
+    DELIVERY_START_COVER от спроса дня D+1. Так на начало дня спроса остаток уже
+    перекрывает ≥50% и не уходит в минус."""
     _, mnum, day_d = all_dates[di]
     prev_ss = _gp_prev_ss_ref(gp_ri, di)
     dem_today = _gp_demand_ref(gp_ri, mnum, day_d)
@@ -3570,7 +3962,8 @@ def _gp_del_formula(gp_ri, di):
 t = ws_g.cell(1, 1)
 t.value = (f"ГРАФИК ПОСТАВОК | {PERIOD_LABEL}  |  "
            "🟢 Поставка  🔴 Дефицит  🟡 Ниже страх.запаса  "
-           "G = остаток нач.мес.  |  📦 только в дни спроса (кол. после даты)  |  "
+           "G = остаток нач.мес.  |  📦 поставка ЗАРАНЕЕ (в день перед спросом): "
+           "на начало дня спроса остаток ≥50% потребности, без минуса  |  "
            "Ecoal'yance: 1×/мес (1–5) | Ecotexis: +35д от заказа | "
            f"Purem/SMC: 1×/нед | SMC ≤{SMC_MAX_PALLETS_PER_TRUCK} палл./фура")
 t.font = Font(bold=True, size=9, color="FFFFFF", name="Arial")
@@ -3579,21 +3972,22 @@ t.alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
 ws_g.merge_cells(f'A1:{get_column_letter(_total_cols_gp)}1')
 
 # Строка 2: месячные метки (объединённые)
-_GP_FIX_H = ['Код детали','Наименование','Поставщик','Ед.','Уп.','Страх.\nшт','Остаток\n(нач.мес.)']
-_GP_FIX_W = [22, 42, 16, 5, 5, 9, 11]
+_GP_FIX_H = ['Код детали','Наименование / Применяемость / Цвет','Поставщик','Ед.','Уп.','Страх.\nшт','Остаток\n(нач.мес.)']
+_GP_FIX_W = [22, 60, 16, 5, 5, 9, 11]
 for ci, (h, w) in enumerate(zip(_GP_FIX_H, _GP_FIX_W), 1):
-    hcell(ws_g, 2, ci, h, H_FILL)
+    # Заголовок фикс-колонок пишем ОДИН раз — в строке 3 (строка автофильтра).
+    # Строку 2 оставляем пустой (только заливка), чтобы не задваивать заголовок.
+    ws_g.cell(2, ci).fill = H_FILL
     hcell(ws_g, 3, ci, h, H_FILL)
     ws_g.column_dimensions[get_column_letter(ci)].width = w
-# Fixed headers stay unmerged so Excel can expose autofilter dropdowns
-# for Код/Наименование/Поставщик and the other static columns.
+# Заголовки фикс-колонок — только в строке 3 (без задвоения); автофильтр по строке 3.
 
 # Месячные метки в строке 2 над днями
 for mnum_m, mlabel_m, ndays_m in MONTHS:
     first_di = sum(nd for mn,_,nd in MONTHS if mn < mnum_m)
     last_di  = first_di + ndays_m - 1
-    col_first = 8 + first_di * 2
-    col_last  = 8 + last_di  * 2 + 1
+    col_first = 8 + first_di * 3
+    col_last  = 8 + last_di  * 3 + 2
     mc = ws_g.cell(2, col_first)
     mc.value = mlabel_m
     mc.font  = Font(bold=True, size=10, color="FFFFFF", name="Arial")
@@ -3605,6 +3999,7 @@ for mnum_m, mlabel_m, ndays_m in MONTHS:
 _DEL_FILL = fill("C6EFCE")   # зелёный — колонка поставки
 for di, (dt, mnum_h, d_h) in enumerate(all_dates):
     ci_ss  = _gp_ci_ss(di)
+    ci_dem = _gp_ci_dem(di)
     ci_del = _gp_ci_del(di)
     c_sh = ws_g.cell(3, ci_ss)
     c_sh.value = dt.strftime('%d.%m')
@@ -3612,6 +4007,12 @@ for di, (dt, mnum_h, d_h) in enumerate(all_dates):
     c_sh.fill  = M_FILL[mnum_h]
     c_sh.alignment = Alignment(horizontal='center', vertical='center')
     ws_g.column_dimensions[get_column_letter(ci_ss)].width = 5.5
+    c_qh = ws_g.cell(3, ci_dem)
+    c_qh.value = 'потр'
+    c_qh.font  = Font(bold=True, size=8, name="Arial", color="9C5700")
+    c_qh.fill  = fill("FFF2CC")
+    c_qh.alignment = Alignment(horizontal='center', vertical='center')
+    ws_g.column_dimensions[get_column_letter(ci_dem)].width = 5.5
     c_dh = ws_g.cell(3, ci_del)
     c_dh.value = '📦'
     c_dh.font  = Font(bold=True, size=8, name="Arial")
@@ -3630,11 +4031,16 @@ for ri, code in enumerate(mrp_codes, _gp_data_start):
     total_3m  = sum(sum(demand[code].get(mn, {}).values()) for mn, _, _ in MONTHS)
     n_days_3m = sum(nd for _, _, nd in MONTHS)
     avg_daily  = total_3m / n_days_3m if n_days_3m else 0
-    safety_qty = round(avg_daily * sd, 2)
+    safety_qty = _safety_qty(code, supp)
     stk_fallback = int(stock.get(code, 0))
+    # MSA, деталь с потребностью в 1-й день горизонта: топ-ап нач.остатка (предзавоз до горизонта)
+    if normalize_supplier(supp) == MSA_SUPPLIER:
+        _d0c = demand.get(code, {}).get(all_dates[0][1], {}).get(all_dates[0][2], 0)
+        if _d0c > 0:
+            stk_fallback = max(stk_fallback, int(round(safety_qty + _d0c)))
 
     # A-E: статика
-    for ci, v in enumerate([code, name[:46], supp, unit, pkg], 1):
+    for ci, v in enumerate([code, _name_with_appl(code,name), supp, unit, pkg], 1):
         c = ws_g.cell(ri, ci); c.value = v
         c.font = Font(size=9, name="Arial")
         c.alignment = Alignment(horizontal='left' if ci <= 2 else 'center', vertical='center')
@@ -3655,18 +4061,38 @@ for ri, code in enumerate(mrp_codes, _gp_data_start):
 
     # H+: Ss (остаток) | Del (поставка только в дни спроса)
     _man_ri = stock_input_row.get(code)
+    # Предыдущий рабочий день (день потребности) этой детали: его поставка ПРИХОДИТ сегодня
+    # и участвует в остатке текущего дня (модель «поставка предыдущего дня»).
+    _gp_is_msa = normalize_supplier(supp) == MSA_SUPPLIER
+    _gp_prevwd = [None] * len(all_dates)
+    _gp_lw = None
+    for _i, (_dtx, _mx, _dx) in enumerate(all_dates):
+        _gp_prevwd[_i] = _gp_lw
+        if demand.get(code, {}).get(_mx, {}).get(_dx, 0) > 0:
+            _gp_lw = _i
     for di, (dt, mnum_d, day_d) in enumerate(all_dates):
         ci_ss  = _gp_ci_ss(di)
+        ci_dem = _gp_ci_dem(di)
         ci_del = _gp_ci_del(di)
         prev_ss  = _gp_prev_ss_ref(ri, di)
         dem_expr = _gp_demand_ref(ri, mnum_d, day_d)
-        del_col  = get_column_letter(ci_del)
+        if _gp_is_msa:
+            _pwd = _gp_prevwd[di]
+            _isdem_gp = demand.get(code, {}).get(mnum_d, {}).get(day_d, 0) > 0
+            if _pwd is not None:
+                _arr = f"+{get_column_letter(_gp_ci_del(_pwd))}{ri}"      # поставка пред. дня
+            elif _isdem_gp and di > 0:
+                _arr = f"+{get_column_letter(_gp_ci_del(di - 1))}{ri}"    # стартовая поставка
+            else:
+                _arr = ""
+        else:
+            _arr = f"+{get_column_letter(_gp_ci_del(di))}{ri}"           # прочие — поставка дня
         _man_ci = stock_input_date_col.get(dt)
         if _man_ri and _man_ci:
             _man_cell = f"Ввод_Остатков!{get_column_letter(_man_ci)}{_man_ri}"
-            ss_formula = f"=IF(ISNUMBER({_man_cell}),{_man_cell},{prev_ss}-{dem_expr}+{del_col}{ri})"
+            ss_formula = f"=IF(ISNUMBER({_man_cell}),{_man_cell},{prev_ss}-{dem_expr}{_arr})"
         else:
-            ss_formula = f"={prev_ss}-{dem_expr}+{del_col}{ri}"
+            ss_formula = f"={prev_ss}-{dem_expr}{_arr}"
 
         c_ss = ws_g.cell(ri, ci_ss)
         c_ss.value = ss_formula
@@ -3675,8 +4101,19 @@ for ri, code in enumerate(mrp_codes, _gp_data_start):
         c_ss.alignment = Alignment(horizontal='center', vertical='center')
         if fb: c_ss.fill = fb
 
+        c_dem = ws_g.cell(ri, ci_dem)
+        c_dem.value = "=" + _gp_demand_ref(ri, mnum_d, day_d)
+        c_dem.font = Font(size=8, name="Arial", color="9C5700")
+        c_dem.number_format = '#,##0'
+        c_dem.alignment = Alignment(horizontal='center', vertical='center')
+        c_dem.fill = fill("FFF8E1")
+
+        # Поставка = значение из DELIVERY_SCHEDULES (пары + лимит фуры 21),
+        # чтобы вкладка График_Поставок совпадала с выгрузками по поставщикам.
+        _ds_dels = DELIVERY_SCHEDULES.get(code, {}).get('dels', [])
+        _del_v = _ds_dels[di] if di < len(_ds_dels) else 0
         c_del = ws_g.cell(ri, ci_del)
-        c_del.value = _gp_del_formula(ri, di)
+        c_del.value = int(round(_del_v)) if _del_v and round(_del_v) > 0 else None
         c_del.font = Font(size=8, name="Arial", bold=True)
         c_del.number_format = '#,##0'
         c_del.alignment = Alignment(horizontal='center', vertical='center')
@@ -3688,18 +4125,18 @@ ws_g.auto_filter.ref = f"A3:{get_column_letter(_total_cols_gp)}{_gp_filter_last_
 # Del колонки (I, K, M, ...): зелёный если > 0
 _del_range = f"H{_gp_data_start}:{get_column_letter(_total_cols_gp)}{_gp_last_row}"
 ws_g.conditional_formatting.add(_del_range, _FR_gp(
-    formula=[f"AND(MOD(COLUMN(H{_gp_data_start})-8,2)=1,H{_gp_data_start}>0)"],
+    formula=[f"AND(MOD(COLUMN(H{_gp_data_start})-8,3)=2,H{_gp_data_start}>0)"],
     fill=PatternFill("solid", fgColor="C6EFCE"),
     font=Font(color="375623", bold=True, size=8, name="Arial")))
 # Ss колонки (H, J, L, ...): красный если < 0
 _ss_range = f"H{_gp_data_start}:{get_column_letter(_total_cols_gp)}{_gp_last_row}"
 ws_g.conditional_formatting.add(_ss_range, _FR_gp(
-    formula=[f"AND(MOD(COLUMN(H{_gp_data_start})-8,2)=0,H{_gp_data_start}<0)"],
+    formula=[f"AND(MOD(COLUMN(H{_gp_data_start})-8,3)=0,H{_gp_data_start}<0)"],
     fill=PatternFill("solid", fgColor="FFC7CE"),
     font=Font(color="9C0006", bold=True, size=8, name="Arial")))
 # Ss колонки: жёлтый если ниже страхового
 ws_g.conditional_formatting.add(_ss_range, _FR_gp(
-    formula=[f"AND(MOD(COLUMN(H{_gp_data_start})-8,2)=0,H{_gp_data_start}>=0,H{_gp_data_start}<$F{_gp_data_start})"],
+    formula=[f"AND(MOD(COLUMN(H{_gp_data_start})-8,3)=0,H{_gp_data_start}>=0,H{_gp_data_start}<$F{_gp_data_start})"],
     fill=PatternFill("solid", fgColor="FFEB9C"),
     font=Font(color="9C5700", size=8, name="Arial")))
 
@@ -3711,7 +4148,7 @@ t=ws_t.cell(1,1); t.value=f"АНАЛИТИКА ОБОРАЧИВАЕМОСТИ | 
 t.font=Font(bold=True,size=13,color="FFFFFF",name="Arial"); t.fill=H3
 t.alignment=Alignment(horizontal='center',vertical='center')
 ws_t.merge_cells(f'A1:{get_column_letter(4+len(WEEKS)*2+3)}1')
-for ci,(h,w) in enumerate(zip(['Код','Наименование','Поставщик','Ед.'],[22,44,16,6]),1):
+for ci,(h,w) in enumerate(zip(['Код','Наименование / Применяемость / Цвет','Поставщик','Ед.'],[22,60,16,6]),1):
     hcell(ws_t,2,ci,h,H_FILL); ws_t.column_dimensions[get_column_letter(ci)].width=w
 for wi,w_info in enumerate(WEEKS):
     bc=5+wi*2; wf=fill(WEEK_CLR[wi])
@@ -3731,7 +4168,7 @@ for ri,code in enumerate(mrp_codes,3):
     ws_t.row_dimensions[ri].height=14; fb=GRY_F if ri%2==0 else NO_F
     name,supp,unit=get_info(code); stk=stock.get(code,0)
     wd=weekly_demand_map(code); pkg=max(1,bom.get(code,{}).get('package',1))
-    for ci,v in enumerate([code,name[:50],supp,unit],1):
+    for ci,v in enumerate([code,_name_with_appl(code,name),supp,unit],1):
         c=ws_t.cell(ri,ci); c.value=v; c.font=Font(size=9,name="Arial")
         c.alignment=Alignment(horizontal='left' if ci<=2 else 'center',vertical='center')
         if fb: c.fill=fb
@@ -3782,10 +4219,10 @@ t.alignment=Alignment(horizontal='center',vertical='center'); ws_bl.merge_cells(
 ws_bl.cell(2,1).value="FIX#1=B16 elite сиденья | FIX#2=ALAA005669 B06 | Жёлтый=исправлена применяемость"
 ws_bl.cell(2,1).font=Font(italic=True,size=9,color="1F3864",name="Arial")
 ws_bl.cell(2,1).fill=fill("E8F5E9"); ws_bl.merge_cells('A2:N2')
-lh=['Код','Наименование','Поставщик','Ед.','Тип/Норма','Вкладка плана',
+lh=['Код','Наименование / Применяемость / Цвет','Поставщик','Ед.','Тип/Норма','Вкладка плана',
     f'Уп.\n(шт)',f'Потребн.\n{MONTH_SHORT[MONTHS[0][0]]}',f'Потребн.\n{MONTH_SHORT[MONTHS[1][0]]}',f'Потребн.\n{MONTH_SHORT[MONTHS[2][0]]}',
     'Итого\n3 мес.','Остаток','Статус','Раздел BOM']
-lw=[22,42,16,6,28,22,7,12,12,12,12,10,16,25]
+lw=[22,60,16,6,28,22,7,12,12,12,12,10,16,25]
 for ci,(h,w) in enumerate(zip(lh,lw),1):
     hcell(ws_bl,3,ci,h,H_FILL); ws_bl.column_dimensions[get_column_letter(ci)].width=w
 for ri,code in enumerate(mrp_codes,4):
@@ -3801,7 +4238,7 @@ for ri,code in enumerate(mrp_codes,4):
     elif code=='ALAA005669': st="FIX#2: B06 paint"
     elif d_tot==0: st="⚠️ Нет спроса"
     else: st="✅ OK"
-    vals=[code,name[:50],supp,unit,norm_str,tab,pkg,
+    vals=[code,_name_with_appl(code,name),supp,unit,norm_str,tab,pkg,
           d_may if d_may>0 else None,d_jun if d_jun>0 else None,d_jul if d_jul>0 else None,
           d_tot if d_tot>0 else None,stk if stk>0 else None,st,sec]
     for ci,v in enumerate(vals,1):
@@ -3822,8 +4259,8 @@ for ri,code in enumerate(mrp_codes,4):
 print("  Сводка_3мес...")
 ws_s=wb_out.create_sheet('Сводка_3мес')
 ws_s.freeze_panes='H2'; ws_s.row_dimensions[1].height=50
-SH=['Код','Наименование','Поставщик','Ед.','Уп.(шт)','Остаток']
-SW=[22,44,16,6,7,10]
+SH=['Код','Наименование / Применяемость / Цвет','Поставщик','Ед.','Уп.(шт)','Остаток']
+SW=[22,60,16,6,7,10]
 for ci,(h,w) in enumerate(zip(SH,SW),1):
     hcell(ws_s,1,ci,h,H_FILL); ws_s.column_dimensions[get_column_letter(ci)].width=w
 for mi,(mnum,mlabel,_) in enumerate(MONTHS):
@@ -3837,7 +4274,7 @@ for mi,(mnum,mlabel,_) in enumerate(MONTHS):
 for ri,code in enumerate(mrp_codes,2):
     ws_s.row_dimensions[ri].height=14; fb=GRY_F if ri%2==0 else NO_F
     name,supp,unit=get_info(code); stk=stock.get(code,0); pkg=bom.get(code,{}).get('package',1)
-    for ci,v in enumerate([code,name[:50],supp,unit,pkg,stk],1):
+    for ci,v in enumerate([code,_name_with_appl(code,name),supp,unit,pkg,stk],1):
         c=ws_s.cell(ri,ci); c.value=v; c.font=Font(size=9,name="Arial")
         c.alignment=Alignment(horizontal='left' if ci<=2 else 'center',vertical='center')
         if ci==5: c.fill=ORG_F
@@ -3956,10 +4393,10 @@ lg.value = ("🔴 Дефицит = отрицательный баланс по 
 lg.font = Font(italic=True, size=9, color="555555", name="Arial")
 lg.alignment = Alignment(wrap_text=True, vertical='center')
 ws_r.merge_cells(f'A2:{get_column_letter(_RISK_LAST_COL)}2')
-RH = ['Код', 'Наименование', 'Поставщик', 'Ед.', 'Уп.', 'Остаток', 'Ср/день',
+RH = ['Код', 'Наименование / Применяемость / Цвет', 'Поставщик', 'Ед.', 'Уп.', 'Остаток', 'Ср/день',
       'Норм.\nдней', 'Норм.\nтреб.', 'Дефицит', 'Дата\nдефицита', 'Дн.\nзапаса',
       'Статус', 'Комментарий', 'Ближ.\nпоставка', 'Кол-во\nпоставки', 'Закрытие\nдефицита']
-RW = [22, 38, 16, 6, 7, 11, 10, 7, 12, 12, 12, 9, 16, 30, 12, 11, 12]
+RW = [22, 60, 16, 6, 7, 11, 10, 7, 12, 12, 12, 9, 16, 30, 12, 11, 12]
 for ci, (h, w) in enumerate(zip(RH, RW), 1):
     hcell(ws_r, 3, ci, h, H_FILL)
     ws_r.column_dimensions[get_column_letter(ci)].width = w
@@ -4014,7 +4451,7 @@ for code in mrp_codes:
         sd_val = round(sd_val, 1)
 
     risk_rows.append({
-        'code': code, 'name': name[:45], 'supplier': supp, 'unit': unit, 'pkg': pkg,
+        'code': code, 'name': _name_with_appl(code,name), 'supplier': supp, 'unit': unit, 'pkg': pkg,
         'stk': stk, 'avg': round(avg, 2), 'norm_days': norm_days, 'norm_qty': norm_qty,
         'def_qty': def_qty, 'def_date': first_def, 'sd_val': sd_val if sd_val < 9000 else None,
         'status': st, 'comment': comment, 'is_def': is_def,
@@ -4330,6 +4767,35 @@ for ri, row_data in enumerate(CFG_DATA, 3):
 
 print(f"    Конфигурации: {len(CFG_DATA)} конфигураций")
 
+# ═══ Фильтры по колонкам + удобный VLOOKUP на КАЖДОЙ вкладке ═══
+# Включаем автофильтр на строке заголовка (там, где «Код»...), и разъединяем
+# объединённые ячейки В ТЕЛЕ таблицы (ниже заголовка) — иначе фильтр и VLOOKUP
+# ломаются. Заливки/шрифты (форматирование) сохраняются; объединения шапки/титула — тоже.
+def _enable_column_filter(ws):
+    hdr = None
+    for r in range(1, min(ws.max_row, 8) + 1):
+        for c in (1, 2, 3):
+            v = ws.cell(r, c).value
+            if v and 'Код' in str(v):
+                hdr = r
+                break
+        if hdr:
+            break
+    if not hdr:
+        return
+    for rng in list(ws.merged_cells.ranges):
+        if rng.min_row > hdr:               # объединения в теле — разъединяем (формат остаётся)
+            ws.unmerge_cells(str(rng))
+    if ws.max_row > hdr and ws.max_column >= 1:
+        ws.auto_filter.ref = f"A{hdr}:{get_column_letter(ws.max_column)}{ws.max_row}"
+
+for _ws in wb_out.worksheets:
+    try:
+        _enable_column_filter(_ws)
+    except Exception as _ef:
+        print(f"  ⚠️  Фильтр не добавлен для «{_ws.title}»: {_ef}")
+print("  Автофильтр по колонкам включён на всех вкладках; тело без объединений (VLOOKUP-friendly)")
+
 # ═══ Сохраняем ═══════════════════════════════════════════════
 OUT_SAVED = _save_workbook_safe(wb_out, OUT)
 print(f"\n✅ Готово! Файл сохранён: {OUT_SAVED}")
@@ -4392,14 +4858,14 @@ try:
                 _sched = _sim_schedule(_code)
                 _week_dels = {di: _sched[di][0] for di, _ in _nw_indices
                               if _sched.get(di, (0,))[0] > 0}
-                if not _week_dels:
-                    continue  # нет поставок на эту неделю
+                _total3 = sum(sum(demand[_code].get(mn, {}).values()) for mn, _, _ in MONTHS)
+                # Показываем ВСЕ позиции поставщика с потребностью (а не только те,
+                # что отгружаются на следующей неделе) — кол-во позиций = кол-ву в потребности.
+                if _total3 <= 0 and not _week_dels:
+                    continue
                 _info   = bom.get(_code, {})
                 _pkg    = max(1, _info.get('package', 1))
-                _sd     = get_safety_days(_code, _supp_name)
-                _total3 = sum(sum(demand[_code].get(mn, {}).values()) for mn, _, _ in MONTHS)
-                _ndays3 = sum(nd for _, _, nd in MONTHS)
-                _safety = round(_total3 / _ndays3 * _sd, 1) if _ndays3 else 0
+                _safety = _safety_qty(_code, _supp_name)
                 _rows_out.append((_code,
                                   _info.get('name', ''),
                                   _info.get('unit', 'шт'),
@@ -4430,8 +4896,8 @@ try:
 
             # Строка 2: заголовки колонок
             _ws_s.row_dimensions[2].height = 28
-            _ch = ['Код детали', 'Наименование', 'Ед.', 'Уп.(шт)', 'Страх.\nзапас', 'ИТОГО\nнеделя']
-            _cw = [22, 44, 6, 7, 10, 10]
+            _ch = ['Код детали', 'Наименование / Применяемость / Цвет', 'Ед.', 'Уп.(шт)', 'Страх.\nзапас', 'ИТОГО\nнеделя']
+            _cw = [22, 60, 6, 7, 10, 10]
             for _di, _dt in _nw_indices:
                 _ch.append(_dt.strftime('%d.%m\n%a').replace('Mon','Пн').replace('Tue','Вт')
                            .replace('Wed','Ср').replace('Thu','Чт').replace('Fri','Пт')
@@ -4451,7 +4917,7 @@ try:
                 _fb = GRY_F if _ri % 2 == 0 else NO_F
                 _week_total = sum(_wdels.values())
 
-                _static = [_code, _name[:52], _unit, _pkg, _safety, _week_total]
+                _static = [_code, _name_with_appl(_code,_name), _unit, _pkg, _safety, _week_total]
                 for _ci, _v in enumerate(_static, 1):
                     _c = _ws_s.cell(_ri, _ci)
                     _c.value = _v
@@ -4510,8 +4976,7 @@ try:
             _n_exported += 1
             print(f"    ✅ {_supp_name}: {len(_rows_out)} позиций → {os.path.basename(_out_path)}")
 
-        print(f"  Экспорт завершён: {_n_exported} файлов → папка '{os.path.basename(_export_dir)}/'")
+        print(f"  Экспорт завершён: {_n_exported} файлов → папка \'{os.path.basename(_export_dir)}/\'")
 
 except Exception as _exp_err:
     print(f"  ⚠️  Ошибка выгрузки графиков: {_exp_err}")
-    import traceback; traceback.print_exc()
