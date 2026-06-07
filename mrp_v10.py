@@ -4,7 +4,7 @@ MRP v9 — устранение замечаний
 [1] остатки бамперов = улица + линия + буфер (а не один столбец)
 [2] цветная декомпозиция плана для бамперов и красок через
     Order_calculation_statistics_UPDATED.xlsx (батч → цвет → шт)
-[3] задние бампера XST33* — только на дорестайл-партиях
+[3] дорестайл-бамперы XST33/AST33 (передние+задние) — только B02 2WD premium
 [4] B16 elite (подголовники) — ТОЛЬКО B16_4WD_elite
 [5] потребность в краске = норма × кол-во кузовов нужных цветов
 [6] BOM_Детальный — корректный offset столбцов (A01_2WD_comfort не пуст)
@@ -19,6 +19,7 @@ import math, os, json, datetime, warnings, glob
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.datetime import from_excel
 warnings.filterwarnings('ignore')
 
 # ══════════════════════════════════════════════════════════════
@@ -31,13 +32,61 @@ warnings.filterwarnings('ignore')
 # ROOT = папка где лежит скрипт. Работает на любом компьютере без изменений.
 ROOT = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
 
+def _is_excel_lock_file(path):
+    """Excel lock/temp files (~$...) are not real workbooks."""
+    return os.path.basename(path).startswith('~$')
+
+def _resolve_excel_path(path):
+    """If a lock file was picked, resolve to the real workbook next to it."""
+    if not path:
+        return path
+    if not _is_excel_lock_file(path):
+        return path
+    real_name = os.path.basename(path)[2:]
+    real_path = os.path.join(os.path.dirname(path), real_name)
+    return real_path if os.path.isfile(real_path) else path
+
+def _save_workbook_safe(wb, target_path, label='результат MRP'):
+    """Сохраняет workbook; если файл открыт в Excel — пробует альтернативное имя."""
+    base, ext = os.path.splitext(target_path)
+    folder = os.path.dirname(target_path) or ROOT
+    ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    candidates = [
+        target_path,
+        os.path.join(folder, f"MRP_System_v9_new{ext}"),
+        os.path.join(folder, f"MRP_System_v9_{ts}{ext}"),
+    ]
+    last_err = None
+    for path in candidates:
+        try:
+            wb.save(path)
+            if os.path.normcase(path) != os.path.normcase(target_path):
+                print(f"\n  ⚠️  {os.path.basename(target_path)} открыт в Excel — сохранено как:")
+                print(f"       {path}")
+            return path
+        except PermissionError as e:
+            last_err = e
+            print(f"  ⚠️  Нет доступа к «{os.path.basename(path)}» — закройте файл в Excel")
+        except OSError as e:
+            if getattr(e, 'errno', None) == 13:
+                last_err = e
+                print(f"  ⚠️  Нет доступа к «{os.path.basename(path)}» — закройте файл в Excel")
+            else:
+                raise
+    print(f"\n  ❌ Не удалось сохранить {label}.")
+    print("     Закройте MRP_System_v9.xlsx (и Excel полностью, если нужно) и запустите скрипт снова.")
+    raise last_err
+
 def _latest(folder, *patterns):
     """Возвращает самый свежий файл среди всех паттернов, или None."""
     candidates = []
     for pat in patterns:
         candidates.extend(glob.glob(os.path.join(folder, pat)))
         candidates.extend(glob.glob(os.path.join(folder, '**', pat), recursive=True))
-    candidates = [p for p in candidates if os.path.isfile(p)]
+    candidates = [
+        p for p in candidates
+        if os.path.isfile(p) and not _is_excel_lock_file(p)
+    ]
     return max(candidates, key=os.path.getmtime) if candidates else None
 
 def _require(path, label):
@@ -46,9 +95,9 @@ def _require(path, label):
     return path or ''
 
 # ── Основные файлы ────────────────────────────────────────────
-PF_FILE  = _require(_latest(ROOT, "*Plan-Fact*.xlsx", "*Plan_Fact*.xlsx",
-                             "*план-факт*.xlsx", "*планфакт*.xlsx"),
-                    "Plan-Fact (план производства)")
+PF_FILE  = _resolve_excel_path(_require(_latest(ROOT, "*Plan-Fact*.xlsx", "*Plan_Fact*.xlsx",
+                                                  "*план-факт*.xlsx", "*планфакт*.xlsx"),
+                                       "Plan-Fact (план производства)"))
 
 BOM_FILE = _require(_latest(ROOT, "Master_BOM_актуальный.xlsx",
                              "Master_BOM*.xlsx"),
@@ -154,8 +203,9 @@ _SKIP_IN_STOCK = ['mrp_system','plan-fact','plan_fact','master_bom',
                    'упаковка','additional','order_calc','order calculation','涂装']
 
 # Сортируем все xlsx по дате изменения (сначала новые)
-_all_xlsx = sorted(glob.glob(os.path.join(ROOT, "*.xlsx")),
-                   key=os.path.getmtime, reverse=True)
+_all_xlsx = sorted(
+    (p for p in glob.glob(os.path.join(ROOT, "*.xlsx")) if not _is_excel_lock_file(p)),
+    key=os.path.getmtime, reverse=True)
 
 STOCK_FILES = []
 _seen_groups = set()   # группы, для которых файл уже найден
@@ -299,6 +349,7 @@ SUPPLIER_TAB_MAP = {
 # Формат: код → множество разрешённых конфигурационных ключей.
 # Применяется ПОСЛЕ загрузки BOM — перезаписывает данные из xlsx-файла.
 BOM_APPLICABILITY_OVERRIDES = {
+    # Дорестайл-бамперы XST33/AST33 — overrides дополняются автоматически из bumper_clr_map
     # LK015530 (SGK): в BOM ошибочно помечен на B02+B04; должен только B04
     'LK015530': {'B04_4WD_TechPlus', 'B04_4WD_premium'},
     # 1101100XKJ23A (Yapp): в BOM нет отметок о применяемости → без override
@@ -353,6 +404,61 @@ B02_ALL_THREE = frozenset({'B02_2WD_premium', 'B02_4WD_elite', 'B02_4WD_TechPlus
 B02_PREM_2WD_ONLY_FRAGMENTS = ('XST33', 'AST33', 'AKN02')
 # Рестайл B02 4WD: бамперы/кузовные XKN61 — только 4WD, не elite 2WD
 B02_4WD_RESTYLE_FRAGMENTS = ('XKN61', 'KN260004', 'KN260005', 'AKN61')
+# Дорестайл-бамперы XST33/AST33 (передние 2803120/2804104 и задние 2803130/2804105)
+# — только B02 2WD premium из AS_in_F_A; рестайл XKN61 не входит
+PRERESTYLE_B02_CONFIGS = {'premium'}
+PRERESTYLE_B02_DRIVES = {'2WD'}
+# Дорестайл-бамперы XST33/AST33 (2803120/2804104) ставятся на A01 2WD premium
+# (подтверждено по плану: на 06.06 идут A01 4x2 premium, цвет C3 → бампер AC3).
+PRERESTYLE_PREMIUM_MODEL = 'A01'
+PRERESTYLE_PREMIUM_CFG = 'A01_2WD_premium'
+PRERESTYLE_BUMPER_MARKERS = ('XST33', 'AST33')
+PRERESTYLE_BUMPER_EXCLUDE = ('XKN61', 'KN260004', 'KN260005', 'AKN61')
+# Дорестайл-бамперы B02 2WD premium, которые РЕАЛЬНО заказываются:
+#   передний 2803120XST33*  и  задний 2804104AST33*
+# Варианты 2803130XST33* / 2804105AST33* — это другая (не premium) модификация,
+# на B02 2WD premium не ставится → потребность 0 (замечания пользователя 06.06).
+PRERESTYLE_PREMIUM_BUMPER_PREFIXES = ('2803120XST33', '2804104AST33')
+
+
+def _is_prerestyle_bumper_code(code):
+    c = str(code)
+    if any(x in c for x in PRERESTYLE_BUMPER_EXCLUDE):
+        return False
+    return any(m in c for m in PRERESTYLE_BUMPER_MARKERS)
+
+
+def _is_prerestyle_premium_bumper_code(code):
+    """Дорестайл-бампер, который ставится на B02 2WD premium (2803120/2804104)."""
+    if not _is_prerestyle_bumper_code(code):
+        return False
+    c = str(code)
+    return any(c.startswith(p) for p in PRERESTYLE_PREMIUM_BUMPER_PREFIXES)
+
+
+def _normalize_batch_id(bv):
+    return re.sub(r'\s+', '', str(bv or '').strip().upper())
+
+
+def _map_plan_config(value):
+    s = str(value or '').strip()
+    if not s:
+        return ''
+    if s in CONFIG_MAP:
+        return CONFIG_MAP[s]
+    sl = s.lower()
+    for k, v in CONFIG_MAP.items():
+        if k.lower() == sl:
+            return v
+    if 'tech' in sl and 'plus' in sl:
+        return 'TechPlus'
+    if 'premium' in sl or '高配' in s or '中高配' in s:
+        return 'premium'
+    if 'elite' in sl or '中配' in s:
+        return 'elite'
+    if 'comfort' in sl or '低配' in s:
+        return 'comfort'
+    return ''
 
 
 def _bom_header_has_b02_2wd_elite(hdr_row):
@@ -372,6 +478,8 @@ def detect_cfg_keys_from_header(hdr_row):
 
 def should_mark_b02_2wd_elite(code, cfgs):
     """Деталь для всех B02 / всех B02 2WD / всех B02 Elite → B02_2WD_elite."""
+    if _is_prerestyle_bumper_code(code):
+        return False
     if not cfgs or 'B02_2WD_elite' in cfgs:
         return False
     if not any(k.startswith('B02_') for k in cfgs):
@@ -381,6 +489,8 @@ def should_mark_b02_2wd_elite(code, cfgs):
     has_tech = 'B02_4WD_TechPlus' in cfgs
     # все B02 (3 существующие конфигурации до elite 2WD)
     if B02_ALL_THREE <= set(cfgs):
+        if any(p in code for p in B02_PREM_2WD_ONLY_FRAGMENTS) and 'XKN61' not in code:
+            return False
         return True
     # все B02 2WD (premium; не дорестайл-only)
     if has_prem and not has_elite and not has_tech:
@@ -436,6 +546,36 @@ def cfg_match(cfg_key, applicable):
     return None, 0
 
 
+def _cfg_model_config(key):
+    """('A01_2WD_premium') → ('A01','premium'); привод (2WD/4WD) игнорируется."""
+    parts = str(key).split('_')
+    if len(parts) >= 3:
+        return (parts[0], parts[2])
+    if len(parts) == 2:
+        return (parts[0], parts[1])
+    return (key, '')
+
+
+def _bumper_cfg_match(code, cfg_key, applicable_b):
+    """Бамперы сопоставляются по (модель, комплектация) без учёта привода.
+
+    Применяемость берётся из BOM (лист BOM_Детальный). 21-конфигурационный BOM
+    не содержит колонок B02_2WD_elite и B02_4WD_premium, но эти кузова есть в плане
+    и используют тот же бампер, что и B02 4WD elite / B02 2WD premium соответственно
+    — поэтому сравниваем по (модель+комплектация), привод не важен для бампера.
+    """
+    if not applicable_b:
+        return None, 0
+    mc = _cfg_model_config(cfg_key)
+    for ak in applicable_b:
+        if _cfg_model_config(ak) == mc:
+            qty = applicable_b[ak] if isinstance(applicable_b, dict) else 1
+            if not (isinstance(qty, (int, float)) and qty > 0):
+                qty = 1
+            return ak, qty
+    return None, 0
+
+
 
 
 
@@ -463,7 +603,9 @@ MODEL_MAP={'New A01':'A01','New A08':'A08','New B02':'B02','New B04':'B04',
            'B02':'B02','B04':'B04','B06':'B06','B06X':'B06','B16':'B16'}
 DRIVE_MAP={'4x2':'2WD','4x4':'4WD','4X2':'2WD','4X4':'4WD',
            '6MT两驱':'2WD','两驱':'2WD','四驱':'4WD','6MT 4x2':'2WD',
-           '4x2':'2WD','4x4':'4WD'}
+           '4x2':'2WD','4x4':'4WD',
+           '2WD':'2WD','4WD':'4WD','FWD':'2WD','AWD':'4WD',
+           '前驱':'2WD','后驱':'4WD','前轮驱动':'2WD','四轮驱动':'4WD'}
 CONFIG_MAP={'comfort低配':'comfort','elite中配':'elite','Elite低配':'elite',
             'elite超低配':'elite','premium高配':'premium','Premium中配':'premium',
             'Premium中高配':'premium','Premium':'premium','Premium低配':'premium',
@@ -1063,10 +1205,72 @@ def get_safety_days(code, supplier=''):
     if v is not None: return v
     return SAFETY_DAYS
 
+def _normalize_stock_date(value):
+    """Normalize any supported stock-date value to datetime.date or None."""
+    if value is None or value == '':
+        return None
+    if isinstance(value, datetime.datetime):
+        return value.date()
+    if isinstance(value, datetime.date):
+        return value
+    if isinstance(value, (int, float)) and value > 0:
+        try:
+            return from_excel(value).date()
+        except Exception:
+            return None
+    s = str(value).strip()
+    if not s:
+        return None
+    for fmt in ('%d.%m.%Y', '%d.%m.%y', '%Y-%m-%d', '%d/%m/%Y', '%d/%m/%y', '%d-%m-%Y', '%d-%m-%y'):
+        try:
+            return datetime.datetime.strptime(s, fmt).date()
+        except ValueError:
+            pass
+    return None
+
+def _parse_manual_stock_date(value):
+    """Parse stock date from Ввод_Остатков col F; blank means keep current source date."""
+    return _normalize_stock_date(value)
+
+def _same_stock_date(left, right):
+    left_n = _normalize_stock_date(left)
+    right_n = _normalize_stock_date(right)
+    return left_n == right_n
+
+def _baseline_stock_date(code, stock_date_baseline):
+    return stock_date_baseline.get(code, _stock_date)
+
 def get_stock_date(code):
     """Дата актуальности остатков для данного кода.
     Если код есть в stock_date_map — берём её, иначе глобальная _stock_date."""
     return stock_date_map.get(code, _stock_date)
+
+def _calc_horizon_dates():
+    return [datetime.date(MONTH_YEAR[mn], mn, d) for mn, _, nd in MONTHS for d in range(1, nd + 1)]
+
+def _parse_stock_input_header_date(value):
+    """Parse dd.mm header on Ввод_Остатков into a date inside the calc horizon."""
+    norm = _normalize_stock_date(value)
+    if norm is not None:
+        return norm
+    s = str(value or '').strip()
+    if not s:
+        return None
+    for fmt in ('%d.%m', '%d.%m.%y'):
+        try:
+            parsed = datetime.datetime.strptime(s, fmt)
+            for dt in _calc_horizon_dates():
+                if dt.day == parsed.day and dt.month == parsed.month:
+                    return dt
+            return None
+        except ValueError:
+            pass
+    return None
+
+_MAN_STOCK_HDR_ROW = 3
+_MAN_STOCK_DATA_START = 4
+_MAN_STOCK_OPEN_COL = 5
+_MAN_STOCK_FIRST_DATE_COL = 6
 
 # ═══ STEP 2: Master BOM ══════════════════════════════════════
 # Priority: 1) Live BOM_Детальный из MRP_System_v9.xlsx (ручные правки),
@@ -1157,7 +1361,8 @@ def load_bom_from_live_output(path):
                 cfgs[cfg_key] = v
         if code in B16_ELITE:
             cfgs.setdefault('B16_4WD_elite', 1)
-        apply_b02_2wd_elite_marks(cfgs, code)
+        if not _is_prerestyle_bumper_code(code):
+            apply_b02_2wd_elite_marks(cfgs, code)
 
         pkg = 1
         if row[27] is not None:
@@ -1317,7 +1522,8 @@ if not BOM_LIVE_ACTIVE:
                 cfgs[cfg] = qty
         if code in B16_ELITE:
             cfgs.setdefault('B16_4WD_elite', 1)
-        apply_b02_2wd_elite_marks(cfgs, code)
+        if not _is_prerestyle_bumper_code(code):
+            apply_b02_2wd_elite_marks(cfgs, code)
         pkg_from_bom = None
         _pkg_col = 27
         if _pkg_col < len(row) and row[_pkg_col] is not None:
@@ -1401,10 +1607,15 @@ print("Loading packaging...")
 # Приоритет источников упаковки:
 # 1) LIVE: Заказы_May col E из существующего MRP_System_v8.xlsx
 # 2) Fallback: Haval_Stock в Упаковка_локала.xlsx
-# Ручные остатки: Ввод_Остатков col4 (Остаток) и col5 (доп.данные)
+# Ручные остатки: Ввод_Остатков col E (остаток на нач.мес.) + даты в колонках F+
 
-manual_stock_override = {}  # code -> qty (ручной ввод из Ввод_Остатков)
+manual_stock_override = {}  # code -> qty (остаток на начало месяца из Ввод_Остатков)
+manual_stock_by_date = {}  # code -> {date: qty} (снимки остатка по дням для График_Поставок)
+manual_stock_date_override = {}  # code -> date (legacy col F — дата актуальности для спроса)
 manual_deliveries     = {}  # не используется, сохраняется для совместимости simulate_deliveries
+stock_baseline = dict(stock)
+stock_date_baseline = dict(stock_date_map)
+_calc_last_date = datetime.date(MONTH_YEAR[MONTHS[-1][0]], MONTHS[-1][0], MONTHS[-1][2])
 
 if os.path.exists(OUT):
     try:
@@ -1436,21 +1647,71 @@ if os.path.exists(OUT):
                         pkg_loaded += 1
                 except: pass
         print(f"  Упаковок из MRP (LIVE): {pkg_loaded}")
-        # B. Ручные остатки из Ввод_Остатков — col E (индекс 4)
+        # B. Ручные остатки из Ввод_Остатков
         manual_count = 0
+        manual_snap_count = 0
+        manual_date_count = 0
+        ignored_date_count = 0
         if 'Ввод_Остатков' in wb_live.sheetnames:
-            for row in wb_live['Ввод_Остатков'].iter_rows(min_row=3, values_only=True):
+            ws_man_live = wb_live['Ввод_Остатков']
+            hdr_row = next(ws_man_live.iter_rows(
+                min_row=_MAN_STOCK_HDR_ROW, max_row=_MAN_STOCK_HDR_ROW, values_only=True), ())
+            hdr_joined = ' '.join(str(x or '').lower() for x in hdr_row[:8])
+            is_date_grid = (
+                'дата остатка' not in hdr_joined
+                and any(
+                    _parse_stock_input_header_date(hdr_row[i])
+                    for i in range(_MAN_STOCK_FIRST_DATE_COL - 1, len(hdr_row))
+                    if i < len(hdr_row) and hdr_row[i] not in (None, '')
+                )
+            )
+            date_col_map = {}
+            if is_date_grid:
+                for ci in range(_MAN_STOCK_FIRST_DATE_COL - 1, len(hdr_row)):
+                    dt = _parse_stock_input_header_date(hdr_row[ci])
+                    if dt:
+                        date_col_map[ci] = dt
+            data_start = _MAN_STOCK_DATA_START if is_date_grid else 3
+            for row in ws_man_live.iter_rows(min_row=data_start, values_only=True):
                 code = str(row[0]).strip() if row[0] else ''
                 if not code or code == 'nan': continue
-                val = row[4] if len(row) > 4 else None  # col E = Остаток
+                val = row[4] if len(row) > 4 else None  # col E = остаток на нач.мес.
                 if val is not None:
                     try:
                         q = float(val)
-                        if q > 0:
+                        baseline_q = stock_baseline.get(code, 0)
+                        if abs(q - baseline_q) > 1e-6:
                             manual_stock_override[code] = q
                             manual_count += 1
                     except: pass
-        print(f"  Ручных остатков из Ввод_Остатков: {manual_count}")
+                if is_date_grid:
+                    for ci, dt in date_col_map.items():
+                        if ci >= len(row) or row[ci] in (None, ''):
+                            continue
+                        try:
+                            snap_q = float(row[ci])
+                        except: 
+                            continue
+                        manual_stock_by_date.setdefault(code, {})[dt] = snap_q
+                        manual_snap_count += 1
+                else:
+                    date_val = row[5] if len(row) > 5 else None  # legacy col F
+                    manual_date = _parse_manual_stock_date(date_val)
+                    if manual_date is not None:
+                        baseline_date = _baseline_stock_date(code, stock_date_baseline)
+                        if _same_stock_date(manual_date, baseline_date):
+                            continue
+                        if manual_date > _calc_last_date:
+                            ignored_date_count += 1
+                            continue
+                        manual_stock_date_override[code] = manual_date
+                        manual_date_count += 1
+        print(f"  Ручных остатков (нач.мес.) из Ввод_Остатков: {manual_count}")
+        print(f"  Ручных снимков остатков по дням: {manual_snap_count}")
+        if manual_date_count:
+            print(f"  Ручных дат актуальности (legacy F): {manual_date_count}")
+        if ignored_date_count:
+            print(f"  ℹ️  Игнорировано дат остатков позже расчётного горизонта: {ignored_date_count}")
         wb_live.close()
     except Exception as e:
         print(f"  ⚠️  Ошибка чтения LIVE файла: {e}")
@@ -1458,6 +1719,8 @@ if os.path.exists(OUT):
 # Применяем ручные остатки ПОВЕРХ файловых данных
 for code, qty in manual_stock_override.items():
     stock[code] = qty  # ручной ввод заменяет данные из файлов остатков
+for code, stock_dt in manual_stock_date_override.items():
+    stock_date_map[code] = stock_dt  # ручная дата меняет горизонт спроса/поставок
 
 # Fallback упаковки из PKG_FILE (Haval_Stock)
 wb_pkg=load_workbook(PKG_FILE,read_only=True)
@@ -1493,25 +1756,29 @@ print(f"  Переопределено упаковок (PACKAGE_OVERRIDES): {pk
       + (" | LIVE: сохранены упаковки из BOM_Детальный" if BOM_LIVE_ACTIVE else ""))
 
 # ── Применяем переопределения применяемости BOM (BOM_APPLICABILITY_OVERRIDES) ──
-# В LIVE-режиме применяемость берётся только из BOM_Детальный (ручные ✓)
 bom_appl_count = 0
-if not BOM_LIVE_ACTIVE:
-    for code, allowed_cfgs in BOM_APPLICABILITY_OVERRIDES.items():
-        if code in bom:
-            bom[code]['configs'] = {k: 1 for k in allowed_cfgs}
-            bom_appl_count += 1
-            print(f"  BOM применяемость {code}: {sorted(allowed_cfgs)}")
-else:
-    print("  BOM применяемость: LIVE — используются правки из BOM_Детальный")
+for code, allowed_cfgs in BOM_APPLICABILITY_OVERRIDES.items():
+    if code in bom:
+        bom[code]['configs'] = {k: 1 for k in allowed_cfgs}
+        bom_appl_count += 1
+        print(f"  BOM применяемость {code}: {sorted(allowed_cfgs)}")
+if BOM_LIVE_ACTIVE:
+    print("  BOM применяемость: LIVE + принудительные overrides поверх BOM_Детальный")
 print(f"  Переопределено применяемостей BOM: {bom_appl_count}")
 
-# B02_2WD_elite: дополняем применяемость по правилам «все B02 / 2WD / Elite»
+# B02_2WD_elite: дополняем применяемость (кроме дорестайл-бамперов XST33/AST33)
 _b02_elite_added = 0
 for _code, _info in bom.items():
+    if _is_prerestyle_bumper_code(_code):
+        continue
     _before = 'B02_2WD_elite' in _info.get('configs', {})
     _info['configs'] = apply_b02_2wd_elite_marks(_info.get('configs', {}), _code)
     if not _before and 'B02_2WD_elite' in _info.get('configs', {}):
         _b02_elite_added += 1
+# Повторно фиксируем overrides после B02_2WD_elite (LIVE BOM мог расширить применяемость)
+for code, allowed_cfgs in BOM_APPLICABILITY_OVERRIDES.items():
+    if code in bom:
+        bom[code]['configs'] = {k: 1 for k in allowed_cfgs}
 if _b02_elite_added:
     print(f"  B02_2WD_elite: добавлена применяемость для {_b02_elite_added} деталей")
 
@@ -1668,6 +1935,18 @@ all_codes = [c for c in all_codes if c not in OBSOLETE_CODES]
 for c in list(OBSOLETE_CODES):
     bom.pop(c, None); part_tab_map.pop(c, None); bumper_meta.pop(c, None)
 
+# Бамперы — только вкладка AS_in_F_A (A01/B02/B04 собираются на F_A; H_B пуст).
+# Применяемость бамперов берётся НАПРЯМУЮ из BOM (BOM_Детальный), без хардкода:
+#   2803120/2804104 → A01 comfort/elite/premium; 2803130/2804105 → A01 Tech Plus;
+#   2803104/2804KN260004 → B02 elite; 2803105/2804KN260005 → B02/B04 premium+TechPlus.
+# Сопоставление с планом — по (модель, комплектация), привод не важен (см. _bumper_cfg_match).
+_bumper_tab_set = 0
+for _bcode in bumper_clr_map:
+    CODE_TAB_OVERRIDES[_bcode] = 'AS_in_F_A'
+    _bumper_tab_set += 1
+if _bumper_tab_set:
+    print(f"  Бамперы: вкладка AS_in_F_A, применяемость из BOM → {_bumper_tab_set} кодов")
+
 # ── Default упаковка для бамперов = 8 шт (если в BOM пусто или 1) ──
 DEFAULT_BUMPER_PKG = 8
 for code in list(bom.keys()):
@@ -1813,8 +2092,12 @@ def _detect_cols(df, hrow, base_cols):
                    if 'config' in str(v).lower()), None)
     cc_use = cc_det if cc_det is not None else base_cols['config'] + offset
 
-    # drive: колонка между model и config (применяем смещение)
-    dc_use = base_cols['drive'] + offset
+    dc_det = next((i for i, v in enumerate(h)
+                   if any(k in str(v).lower() for k in
+                          ('drive', '驱动', 'драйв', '4x2', '4x4', '两驱', '四驱'))), None)
+    dc_use = dc_det if dc_det is not None else base_cols['drive'] + offset
+    if dc_use == cc_use:
+        dc_use = base_cols['drive'] + offset
 
     # day1: ищем первый '1' после конфигурации (числовой заголовок дня)
     d1_det = None
@@ -1829,9 +2112,13 @@ def _detect_cols(df, hrow, base_cols):
 
     return bc_det if bc_det is not None else base_cols['batch'], mc_use, dc_use, cc_use, d1_use
 
-plan_batches={}; batch_info={}
+plan_batches={}; batch_info={}; batch_info_by_tab={}
 for tab,cols in TAB_COLS.items():
-    try: df=pd.read_excel(PF_FILE,sheet_name=tab,header=None)
+    try:
+        df=pd.read_excel(PF_FILE,sheet_name=tab,header=None)
+    except PermissionError:
+        print(f"  Cannot read {tab}: файл открыт в Excel. Закройте {os.path.basename(PF_FILE)} и запустите скрипт снова.")
+        continue
     except Exception as e:
         print(f"  Cannot read {tab}: {e}"); continue
     plan_batches[tab]={}
@@ -1857,17 +2144,31 @@ for tab,cols in TAB_COLS.items():
         for i in range(hrow+1,end_row):
             row=df.iloc[i]
             if _bc>=len(row) or not pd.notna(row.iloc[_bc]): continue
-            bv=str(row.iloc[_bc]).strip()
+            bv = _normalize_batch_id(row.iloc[_bc])
             if not bv.startswith('R'): continue
             try:
                 mr=MODEL_MAP.get(str(row.iloc[_mc]).strip() if _mc<len(row) and pd.notna(row.iloc[_mc]) else '','')
                 dr=DRIVE_MAP.get(str(row.iloc[_dc]).strip() if _dc<len(row) and pd.notna(row.iloc[_dc]) else '','')
-                cr=CONFIG_MAP.get(str(row.iloc[_cc]).strip() if _cc<len(row) and pd.notna(row.iloc[_cc]) else '','')
+                cr=_map_plan_config(row.iloc[_cc] if _cc<len(row) else '')
+                tab_bi = batch_info_by_tab.setdefault(tab, {})
+                if bv not in tab_bi:
+                    tab_bi[bv] = {'model': mr, 'drive': dr, 'config': cr, 'total': 0}
+                else:
+                    _bi = tab_bi[bv]
+                    if mr and not _bi.get('model'):
+                        _bi['model'] = mr
+                    if dr and not _bi.get('drive'):
+                        _bi['drive'] = dr
+                    if cr and not _bi.get('config'):
+                        _bi['config'] = cr
                 if bv not in batch_info:
-                    batch_info[bv]={'model':mr,'drive':dr,'config':cr,'total':0}
+                    batch_info[bv] = dict(tab_bi[bv])
             except:
+                tab_bi = batch_info_by_tab.setdefault(tab, {})
+                if bv not in tab_bi:
+                    tab_bi[bv] = {'model': '', 'drive': '', 'config': '', 'total': 0}
                 if bv not in batch_info:
-                    batch_info[bv]={'model':'','drive':'','config':'','total':0}
+                    batch_info[bv] = dict(tab_bi[bv])
             for d in range(1,n_days+1):
                 col_idx=_d1+d-1
                 if col_idx<len(row) and pd.notna(row.iloc[col_idx]):
@@ -1875,7 +2176,8 @@ for tab,cols in TAB_COLS.items():
                         q=float(row.iloc[col_idx])
                         if q>0:
                             month_data.setdefault(bv,{})[d]=month_data.get(bv,{}).get(d,0)+q
-                            batch_info[bv]['total']+=q
+                            batch_info_by_tab[tab][bv]['total'] += q
+                            batch_info[bv]['total'] += q
                     except: pass
         plan_batches[tab][mnum]=month_data
         n_cars=sum(sum(d.values()) for d in month_data.values())
@@ -1925,7 +2227,7 @@ if os.path.exists(PAINT_STATS):
         for row in ws_ps.iter_rows(min_row=3, values_only=True):
             batch = row[batch_col-1] if batch_col-1 < len(row) else None
             if not batch: continue
-            batch = str(batch).strip()
+            batch = _normalize_batch_id(batch)
             cd = {}
             for ci, k in col_to_key.items():
                 if ci-1 < len(row):
@@ -1944,19 +2246,39 @@ else:
     print(f"  ⚠️  Файл не найден: {PAINT_STATS}")
 
 # ═══ STEP 6: Demand (V7 logic) ════════════════════════════════
-def cars_by_color(month_num, color_key, models=None, configs=None, applicable=None):
+def _unique_batches_for_tabs(month_num, tabs):
+    """Уникальные (вкладка, партия) с выбранных листов — метаданные не смешиваются."""
+    seen = set()
+    out = []
+    for tab in tabs:
+        if tab not in plan_batches or month_num not in plan_batches[tab]:
+            continue
+        for bv, day_qty in plan_batches[tab][month_num].items():
+            key = (tab, bv)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((tab, bv, day_qty))
+    return out
+
+def cars_by_color(month_num, color_key, models=None, configs=None, applicable=None, tabs=None):
     """Возвращает {day: cars} — кузова данного цвета в данном месяце.
-    Дедуплицирует батчи по R-номеру (один батч может быть в нескольких tabs).
-    applicable — dict BOM-применяемости (фильтр по конфигурации партии).
+    Метаданные и цвета партии берутся с той же вкладки плана.
+    tabs — вкладки Plan-Fact из part_tab_map; если None, берутся все вкладки.
     """
     out = {}
     seen = set()
-    for tab, months_data in plan_batches.items():
-        if month_num not in months_data: continue
+    tab_list = tabs if tabs is not None else list(plan_batches.keys())
+    for tab in tab_list:
+        if tab not in plan_batches or month_num not in plan_batches[tab]:
+            continue
+        months_data = plan_batches[tab]
         for bv, day_qty in months_data[month_num].items():
-            if bv in seen: continue
-            seen.add(bv)
-            bi = batch_info.get(bv, {})
+            key = (tab, bv)
+            if key in seen:
+                continue
+            seen.add(key)
+            bi = _get_batch_info(tab, bv)
             b_model = bi.get('model','')
             b_config = bi.get('config','')
             if models and b_model not in models: continue
@@ -1966,7 +2288,7 @@ def cars_by_color(month_num, color_key, models=None, configs=None, applicable=No
                 matched, _ = cfg_match(cfg_key, applicable)
                 if not matched:
                     continue
-            bc_split = batch_color.get(bv, {})
+            bc_split = _batch_color_lookup(bv)
             if not bc_split: continue
             total_in_batch = sum(bc_split.values())
             if total_in_batch <= 0: continue
@@ -1978,7 +2300,7 @@ def cars_by_color(month_num, color_key, models=None, configs=None, applicable=No
     return out
 
 
-def _primer_demand_for_paints(primer_code, month_num, paint_codes):
+def _primer_demand_for_paints(primer_code, month_num, paint_codes, tabs=None):
     """Σ(кузова цветов paint_codes × BOM краски) × норма грунта primer_code."""
     norms = chem_norms.get(primer_code, {})
     if not norms or not paint_codes:
@@ -1994,33 +2316,36 @@ def _primer_demand_for_paints(primer_code, month_num, paint_codes):
                 if norm <= 0:
                     continue
                 cars_d = cars_by_color(
-                    month_num, color_key, models={model_key}, applicable=applicable)
+                    month_num, color_key, models={model_key}, applicable=applicable, tabs=tabs)
                 for day, cars in cars_d.items():
                     daily[day] = daily.get(day, 0) + cars * norm
     return daily
 
 
-def get_primer_demand(primer_code, month_num):
+def get_primer_demand(primer_code, month_num, tabs=None):
     """YIERTE-грунт: все связанные краски минус перешедшие на Litum. Litum-грунт: одна краска."""
     sp_litum = _primer_split_for_litum(primer_code)
     if sp_litum:
         if month_num < sp_litum['from_month']:
             return {}
         return _primer_demand_for_paints(
-            primer_code, month_num, [sp_litum['paint_new']])
+            primer_code, month_num, [sp_litum['paint_new']], tabs=tabs)
     if primer_code not in PRIMER_LINKED_PAINTS:
         return {}
     linked = [p for p in PRIMER_LINKED_PAINTS[primer_code]
               if p not in _primer_excluded_paints(primer_code, month_num)]
-    return _primer_demand_for_paints(primer_code, month_num, linked)
+    return _primer_demand_for_paints(primer_code, month_num, linked, tabs=tabs)
 
-def cars_filter(month_num, models=None, configs=None, predicate=None):
+def cars_filter(month_num, models=None, configs=None, predicate=None, tabs=None):
     """Возвращает {day: cars} с произвольным фильтром по партиям."""
     out = {}
-    for tab, months_data in plan_batches.items():
-        if month_num not in months_data: continue
+    tab_list = tabs if tabs is not None else list(plan_batches.keys())
+    for tab in tab_list:
+        if tab not in plan_batches or month_num not in plan_batches[tab]:
+            continue
+        months_data = plan_batches[tab]
         for bv, day_qty in months_data[month_num].items():
-            bi = batch_info.get(bv, {})
+            bi = _get_batch_info(tab, bv)
             if models and bi.get('model','') not in models: continue
             if configs and bi.get('config','') not in configs: continue
             if predicate and not predicate(bv, bi): continue
@@ -2028,10 +2353,78 @@ def cars_filter(month_num, models=None, configs=None, predicate=None):
                 out[day] = out.get(day, 0) + cars
     return out
 
-# ── Спец-правило для задних бамперов B02 XST33 (только дорестайл) ──
-# Дорестайл-партии — это B02 2WD premium (CC6480AL00C); рестайл — B02 4WD elite/Tech+
-PRERESTYLE_B02_CONFIGS = {'premium'}   # пока: только premium 2WD = pre-restyle
-PRERESTYLE_B02_DRIVES  = {'2WD'}
+def _get_batch_info(tab, bv):
+    """Метаданные партии только с указанной вкладки (без fallback на другие листы)."""
+    return batch_info_by_tab.get(tab, {}).get(_normalize_batch_id(bv), {})
+
+def _batch_id_prefix(bv):
+    m = re.match(r'^([A-Z]+)', _normalize_batch_id(bv))
+    return m.group(1) if m else ''
+
+
+def _batch_color_lookup(bv):
+    """Цвета партии из paint stats. RAW ≠ RAR (разные префиксы не смешиваются)."""
+    bv = _normalize_batch_id(bv)
+    if bv in batch_color:
+        return batch_color[bv]
+    tail = re.sub(r'^[A-Z]+', '', bv)
+    if not tail:
+        return {}
+    bp = _batch_id_prefix(bv)
+    matches = [k for k in batch_color
+               if re.sub(r'^[A-Z]+', '', k) == tail and _batch_id_prefix(k) == bp]
+    if len(matches) == 1:
+        return batch_color[matches[0]]
+    return {}
+
+def _batch_dominant_color(bv):
+    """Преобладающий цвет кузова партии (из paint stats). None если данных нет."""
+    bc = _batch_color_lookup(bv)
+    if not bc:
+        return None
+    return max(bc.items(), key=lambda kv: kv[1])[0]
+
+def _is_prerestyle_bumper(code):
+    return code in bumper_meta and _is_prerestyle_bumper_code(code)
+
+
+def _prerestyle_bumper_applicable():
+    return {PRERESTYLE_PREMIUM_CFG: 1}
+
+
+def _bumper_batch_cfg_key(bi, code=''):
+    """Ключ конфигурации партии.
+    Для дорестайл B02 premium принимаем 2WD ТОЛЬКО если привод в плане не указан
+    (пустой). Если привод задан (4x4 → 4WD), уважаем его, иначе B02 4WD premium
+    ошибочно матчился бы как 2WD premium и завышал потребность бампера."""
+    model = bi.get('model', '') or ''
+    drive = bi.get('drive', '') or ''
+    config = bi.get('config', '') or ''
+    if code and _is_prerestyle_bumper_code(code):
+        if model == PRERESTYLE_PREMIUM_MODEL and config in PRERESTYLE_B02_CONFIGS and not drive:
+            drive = '2WD'
+    return f"{model}_{drive}_{config}"
+
+
+def _bumper_color_share(bv, color_key):
+    """Доля color_key в партии; 0.0 если цвета нет, None если paint stats для партии нет."""
+    bc_split = _batch_color_lookup(bv)
+    if not bc_split:
+        return None
+    total_in_batch = sum(bc_split.values())
+    if total_in_batch <= 0:
+        return None
+    color_cars = bc_split.get(color_key, 0)
+    if color_cars <= 0:
+        return 0.0
+    return color_cars / total_in_batch
+
+
+def _bumper_add_batch_demand(daily, day_qty, share):
+    if share is None or share <= 0:
+        return
+    for day, cars in day_qty.items():
+        daily[day] = daily.get(day, 0) + cars * share
 
 # (HEADREST_X2_CODES, OBSOLETE_CODES, CFG_FUZZY_ALT, cfg_match определены в начале файла)
 
@@ -2042,7 +2435,7 @@ def get_daily_demand_raw_bumper(code, month_num, b_models, tabs):
     for tab in tabs:
         if tab not in plan_batches or month_num not in plan_batches[tab]: continue
         for bv,day_qty in plan_batches[tab][month_num].items():
-            if b_models and batch_info.get(bv,{}).get('model','') not in b_models: continue
+            if b_models and _get_batch_info(tab, bv).get('model','') not in b_models: continue
             for day,cars in day_qty.items():
                 d[day]=d.get(day,0)+cars
     return d
@@ -2059,7 +2452,7 @@ def get_daily_demand(code, month_num):
     if code in chem_norms:
         # ─ Грунты: цвета и применяемость от связанных красок ─
         if code in PRIMER_LINKED_PAINTS:
-            return get_primer_demand(code, month_num)
+            return get_primer_demand(code, month_num, tabs=tabs)
         norms=chem_norms[code]
         color_filter=paint_colors.get(code,False)
         # ─ Цветная краска: norm × кузова нужного(их) цвета(ов) ─
@@ -2068,7 +2461,7 @@ def get_daily_demand(code, month_num):
                 # для каждого цвета — соберём кузова по моделям с подходящей нормой
                 for model_key, norm in norms.items():
                     if norm <= 0: continue
-                    cars_d = cars_by_color(month_num, color_key, models={model_key})
+                    cars_d = cars_by_color(month_num, color_key, models={model_key}, tabs=tabs)
                     for day, cars in cars_d.items():
                         daily[day] = daily.get(day, 0) + cars * norm
             return daily
@@ -2076,7 +2469,7 @@ def get_daily_demand(code, month_num):
         for tab in tabs:
             if tab not in plan_batches or month_num not in plan_batches[tab]: continue
             for bv,day_qty in plan_batches[tab][month_num].items():
-                bi=batch_info.get(bv,{})
+                bi = _get_batch_info(tab, bv)
                 norm=norms.get(bi.get('model',''),0)
                 if norm==0: continue
                 for day,cars in day_qty.items():
@@ -2089,7 +2482,7 @@ def get_daily_demand(code, month_num):
     if code in color_filtered_paints and code not in chem_norms:
         color_keys = paint_colors.get(code, []) or []
         for color_key in color_keys:
-            cars_d = cars_by_color(month_num, color_key)
+            cars_d = cars_by_color(month_num, color_key, tabs=tabs)
             for day, cars in cars_d.items():
                 daily[day] = daily.get(day, 0) + cars * PAINT_FALLBACK_NORM
         # fallback: если paint stats нет — берём V7
@@ -2101,55 +2494,38 @@ def get_daily_demand(code, month_num):
     if code in bumper_meta:
         bm = bumper_meta[code]
         color_key = bm.get('color_key','')
+        # Применяемость бампера — из BOM (BOM_Детальный). Сопоставление по
+        # (модель, комплектация) без учёта привода (_bumper_cfg_match).
         applicable_b = bom.get(code, {}).get('configs', {})
         if not isinstance(applicable_b, dict):
             applicable_b = {k: 1 for k in applicable_b}
-        if code in bom and not applicable_b:
-            return {}
-        # Эвристика только для бамперов без строки в BOM
+        # Запасная эвристика только если бампера НЕТ в BOM вообще.
         if not applicable_b and code not in bom:
             if any(p in code for p in ('XKN61', 'KN260004', 'KN260005')):
                 applicable_b = {'B02_4WD_elite': 1, 'B02_4WD_TechPlus': 1}
             elif any(p in code for p in ('XST33', 'AST33', 'AKN02')):
-                applicable_b = {'B02_2WD_premium': 1}
+                applicable_b = {'A01_2WD_premium': 1}
         if not applicable_b:
             return {}
-        # ── Дедуплицируем партии: одна и та же партия R-номер встречается в ≥1 tab ──
-        seen_batches = set()
-        unique_batches = []   # list of (bv, day_qty)
-        for tab, months_data in plan_batches.items():
-            if month_num not in months_data: continue
-            for bv, day_qty in months_data[month_num].items():
-                if bv in seen_batches: continue
-                seen_batches.add(bv)
-                unique_batches.append((bv, day_qty))
-        # Если есть цветовая раскраска — split по цветам
-        if color_key and batch_color:
-            for bv, day_qty in unique_batches:
-                bi = batch_info.get(bv, {})
-                cfg_key = f"{bi.get('model','')}_{bi.get('drive','')}_{bi.get('config','')}"
-                matched, _ = cfg_match(cfg_key, applicable_b)
-                if not matched: continue
-                bc_split = batch_color.get(bv, {})
-                if not bc_split: continue
-                total_in_batch = sum(bc_split.values())
-                if total_in_batch <= 0: continue
-                color_cars = bc_split.get(color_key, 0)
-                if color_cars <= 0: continue
-                share = color_cars / total_in_batch
-                for day, cars in day_qty.items():
-                    daily[day] = daily.get(day, 0) + cars * share
-            # Бампера — целые единицы (округляем итог по дням)
-            return {d: round(v) for d, v in daily.items()}
-        # fallback: все кузова из applicable_b (без цветовой раскраски)
-        for bv, day_qty in unique_batches:
-            bi = batch_info.get(bv, {})
-            cfg_key = f"{bi.get('model','')}_{bi.get('drive','')}_{bi.get('config','')}"
-            matched, qty = cfg_match(cfg_key, applicable_b)
-            if not matched: continue
-            for day, cars in day_qty.items():
-                daily[day] = daily.get(day, 0) + cars * qty
-        return {d: round(v) for d, v in daily.items()}
+        # ── Дедуплицируем партии только с вкладок из part_tab_map ──
+        # Потребность цвета C = Σ по партиям (машины партии за день × доля цвета C).
+        # Доля цвета берётся из paint statistics (batch → цвет → машины).
+        unique_batches = _unique_batches_for_tabs(month_num, tabs)
+        use_color_split = bool(color_key and batch_color)
+        for tab, bv, day_qty in unique_batches:
+            bi = _get_batch_info(tab, bv)
+            cfg_key = _bumper_batch_cfg_key(bi, code)
+            matched, qty = _bumper_cfg_match(code, cfg_key, applicable_b)
+            if not matched:
+                continue
+            if use_color_split:
+                share = _bumper_color_share(bv, color_key)
+                if share is None or share <= 0:
+                    continue
+                _bumper_add_batch_demand(daily, day_qty, share * qty)
+            else:
+                _bumper_add_batch_demand(daily, day_qty, qty)
+        return {d: max(0, int(round(v))) for d, v in daily.items() if round(v) > 0}
 
     # 3. BOM general
     is_b16 = (code in B16_ELITE)
@@ -2164,7 +2540,7 @@ def get_daily_demand(code, month_num):
     for tab in tabs:
         if tab not in plan_batches or month_num not in plan_batches[tab]: continue
         for bv,day_qty in plan_batches[tab][month_num].items():
-            bi=batch_info.get(bv,{})
+            bi = _get_batch_info(tab, bv)
             b_model=bi.get('model',''); b_drive=bi.get('drive',''); b_config=bi.get('config','')
             qty_per_car = 1  # default: 1 unit per car
             if is_b16:
@@ -2202,6 +2578,74 @@ print(f"  Parts with demand > 0: {with_demand} / {len(mrp_codes)}")
 for code in ['6803112XKN08A','ALAA005669','1101100AGW01A','2803104XKN61A8T']:
     t=sum(demand.get(code,{}).get(MONTHS[0][0],{}).values())
     print(f"  {code}: May={t:.1f}  tab={part_tab_map.get(code,'?')}")
+
+def _debug_bumper_day6(code):
+    if code not in demand:
+        return
+    _cfgs = sorted(bom.get(code, {}).get('configs', {}).keys())
+    print(f"  {code}: tab={part_tab_map.get(code)} BOM={_cfgs}")
+    for mnum, mlabel, _ in MONTHS:
+        _d6 = demand[code].get(mnum, {}).get(6, 0)
+        _tabs = resolve_plan_tabs(part_tab_map.get(code, ''))
+        _parts = []
+        for _tab in _tabs:
+            if _tab not in plan_batches or mnum not in plan_batches[_tab]:
+                continue
+            for _bv, _dq in plan_batches[_tab][mnum].items():
+                _cars6 = _dq.get(6, 0)
+                if _cars6 <= 0:
+                    continue
+                _bi = _get_batch_info(_tab, _bv)
+                _ck = _bumper_batch_cfg_key(_bi, code)
+                _ok, _ = _bumper_cfg_match(code, _ck, bom.get(code, {}).get('configs', {}))
+                if not _ok:
+                    continue
+                _clr = bumper_meta.get(code, {}).get('color_key', '')
+                _exact = 'EXACT' if _normalize_batch_id(_bv) in batch_color else 'fuzzy'
+                _bc = _batch_color_lookup(_bv)
+                _tot = sum(_bc.values()) if _bc else 0
+                _share = _bumper_color_share(_bv, _clr)
+                _share_str = 'no_paint' if _share is None else f"{_share:.3f}"
+                _bc_str = ','.join(f"{k}:{int(v)}" for k, v in
+                                   sorted(_bc.items(), key=lambda kv: -kv[1])[:5]) if _bc else 'no_paint'
+                _parts.append(
+                    f"{_tab}/{_bv}({_ck}) plan_cars={_cars6} paint={_exact} "
+                    f"paint_total={_tot:.0f} share[{_clr}]={_share_str} -> {_cars6*(_share or 0):.0f} | [{_bc_str}]")
+        print(f"    {mlabel} day6={_d6:.0f} clr={bumper_meta.get(code,{}).get('color_key','')}")
+        for _p in _parts:
+            print(f"        {_p}")
+
+
+_PRERESTYLE_BUMPER_DEBUG = (
+    '2803120XST33A8T', '2804104AST33A8T',
+    '2803120XST33A9C', '2804104AST33A9C',
+    '2803120XST33AC3', '2804104AST33AC3',
+    '2803130XST33AC3', '2804105AST33AC3',
+)
+for _dbc in _PRERESTYLE_BUMPER_DEBUG:
+    _debug_bumper_day6(_dbc)
+
+# Сводка потребности по поставщикам (все месяцы расчёта, day-6 отдельно)
+print("  Потребность по поставщикам:")
+for _supp_key in sorted(set(normalize_supplier(bom.get(c, {}).get('supplier', ''))
+                            for c in mrp_codes)):
+    if not _supp_key:
+        continue
+    _parts = sum(1 for _c in mrp_codes
+                 if normalize_supplier(bom.get(_c, {}).get('supplier', '')) == _supp_key
+                 and any(demand[_c].get(_mn) for _mn, _, _ in MONTHS))
+    _month_totals = []
+    _day6_total = 0.0
+    for _mn, _ml, _nd in MONTHS:
+        _mt = sum(sum(demand[_c].get(_mn, {}).values())
+                  for _c in mrp_codes
+                  if normalize_supplier(bom.get(_c, {}).get('supplier', '')) == _supp_key)
+        _month_totals.append(f"{_ml[:3]}={_mt:.0f}")
+        if _nd >= 6:
+            _day6_total += sum(demand[_c].get(_mn, {}).get(6, 0)
+                               for _c in mrp_codes
+                               if normalize_supplier(bom.get(_c, {}).get('supplier', '')) == _supp_key)
+    print(f"    {_supp_key}: {_parts} поз. | {', '.join(_month_totals)} | day6={_day6_total:.0f}")
 
 def get_info(code):
     if code in bom:
@@ -2329,9 +2773,9 @@ def _graph_stock_formula(ri, prev_col_l, prev_col_n, pkg, fallback):
     )
 
 def _delivery_series_demand(code):
-    _code_sdate = get_stock_date(code)
+    """Спрос для графика поставок — как на вкладке Потребность (все дни с потребностью)."""
     return [
-        round(demand[code].get(mn, {}).get(d, 0), 4) if dt > _code_sdate else 0.0
+        round(demand[code].get(mn, {}).get(d, 0), 4)
         for (dt, mn, d) in all_dates
     ]
 
@@ -2426,62 +2870,47 @@ def _cap_smc_day_deliveries(raw_qty):
         out[c] = new_qty
     return out
 
+def _demand_day_delivery_qty(ss_prev, dem_d, safety, pkg):
+    """Поставка только в день спроса: если после спроса остаток < страхового."""
+    if dem_d <= 0:
+        return 0.0
+    proj = ss_prev - dem_d
+    if proj >= safety:
+        return 0.0
+    need = safety - proj
+    del_d = _ceiling_pkg_qty(max(0, need), pkg)
+    return del_d if del_d > 0 else float(pkg)
+
 def _build_initial_deliveries(code, supplier):
     dems = _delivery_series_demand(code)
     pkg = max(1, bom.get(code, {}).get('package', 1))
     safety = _delivery_safety_qty(code, supplier)
-    mode = _delivery_mode(supplier)
     n = len(dems)
     dels = [0.0] * n
-
-    if mode == 'monthly_early':
-        del_days = _monthly_early_delivery_indices()
-    elif mode == 'monthly_lag':
-        del_days = _ecotexis_delivery_indices()
-    elif mode == 'smc_weekly':
-        del_days = _weekday_delivery_indices(SMC_WEEKDAY)
-    elif mode == 'weekly':
-        del_days = _weekday_delivery_indices(PUREM_WEEKDAY)
-    else:
-        del_days = None
-
-    if del_days is not None:
-        del_set = set(del_days)
-        next_map = {
-            del_days[i]: (del_days[i + 1] if i + 1 < len(del_days) else n)
-            for i in range(len(del_days))
-        }
-        ss_prev = float(stock.get(code, 0))
-        for di in range(n):
-            dem_d = dems[di]
-            del_d = 0.0
-            if di in del_set:
-                del_d = _period_delivery_qty(
-                    ss_prev, dems, di, next_map[di], safety, pkg)
-            dels[di] = del_d
-            ss_prev = ss_prev - dem_d + del_d
-        return dels
-
     ss_prev = float(stock.get(code, 0))
-    for di, (dt, _, _) in enumerate(all_dates):
+    for di in range(n):
+        dt = all_dates[di][0]
         dem_d = dems[di]
-        del_d = 0.0
-        if dt.weekday() != 6:
-            la = _lookahead_demand(dems, di)
-            if la > 0 and (ss_prev - dem_d - la) < safety:
-                need = safety - (ss_prev - dem_d - la)
-                del_d = _ceiling_pkg_qty(need, pkg) if need > 0 else pkg
+        del_d = _demand_day_delivery_qty(ss_prev, dem_d, safety, pkg)
         dels[di] = del_d
-        ss_prev = ss_prev - dem_d + del_d
+        ss_prev = _ss_after_day(ss_prev, dem_d, del_d, code, dt)
     return dels
+
+def _ss_after_day(ss_prev, dem_d, del_d, code, dt):
+    """Остаток на конец дня: ручной снимок из Ввод_Остатков или prev − спрос + поставка."""
+    snap = manual_stock_by_date.get(code, {}).get(dt)
+    if snap is not None:
+        return float(snap)
+    return ss_prev - dem_d + del_d
 
 def _recompute_ss_from_deliveries(code, dels):
     dems = _delivery_series_demand(code)
     ss_prev = float(stock.get(code, 0))
     pairs = []
     for di, dem_d in enumerate(dems):
+        dt = all_dates[di][0]
         del_d = dels[di]
-        ss_d = ss_prev - dem_d + del_d
+        ss_d = _ss_after_day(ss_prev, dem_d, del_d, code, dt)
         pairs.append((del_d, ss_d))
         ss_prev = ss_d
     return pairs
@@ -2607,41 +3036,100 @@ print(f"    Упаковка: {len(all_codes)} деталей")
 
 # ── Ввод_Остатков ─────────────────────────────────────────────
 print("  Ввод_Остатков...")
-ws_man=wb_out.create_sheet('Ввод_Остатков')
-ws_man.freeze_panes='A4'; ws_man.row_dimensions[1].height=40; ws_man.row_dimensions[2].height=14
-for ci,(h,w) in enumerate(zip(['Код детали','Наименование','Поставщик','Ед.','Остаток\n✏️ ручной ввод'],[22,44,16,6,18]),1):
-    hcell(ws_man,1,ci,h,H_FILL if ci!=5 else fill("B8860B")); ws_man.column_dimensions[get_column_letter(ci)].width=w
-_he = ws_man.cell(1,5); _he.font=Font(bold=True,color="FFFFFF",size=9,name="Arial"); _he.alignment=Alignment(horizontal='center',vertical='center',wrap_text=True)
+ws_man = wb_out.create_sheet('Ввод_Остатков')
+_n_date_cols_man = len(all_dates)
+_total_cols_man = _MAN_STOCK_OPEN_COL + _n_date_cols_man
+stock_input_date_col = {}
+stock_input_row = {}
+for di, (dt, _, _) in enumerate(all_dates):
+    stock_input_date_col[dt] = _MAN_STOCK_FIRST_DATE_COL + di
+
+ws_man.freeze_panes = 'F4'
+ws_man.row_dimensions[1].height = 40
+ws_man.row_dimensions[2].height = 16
+ws_man.row_dimensions[_MAN_STOCK_HDR_ROW].height = 20
+
+_MAN_FIX_H = ['Код детали', 'Наименование', 'Поставщик', 'Ед.', 'Остаток\n(нач.мес.)\n✏️']
+_MAN_FIX_W = [22, 44, 16, 6, 18]
+for ci, (h, w) in enumerate(zip(_MAN_FIX_H, _MAN_FIX_W), 1):
+    hcell(ws_man, 2, ci, h, H_FILL if ci != _MAN_STOCK_OPEN_COL else fill("B8860B"))
+    hcell(ws_man, _MAN_STOCK_HDR_ROW, ci, h, H_FILL if ci != _MAN_STOCK_OPEN_COL else fill("B8860B"))
+    ws_man.column_dimensions[get_column_letter(ci)].width = w
+    if ci == _MAN_STOCK_OPEN_COL:
+        for _hr in (2, _MAN_STOCK_HDR_ROW):
+            _he = ws_man.cell(_hr, ci)
+            _he.font = Font(bold=True, color="FFFFFF", size=9, name="Arial")
+            _he.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+
 if stock_sources:
     src_names_display = sorted(set(n for s in stock_src.values() for n in s))
-    msg=(f"✅ ОСТАТКИ ЗАГРУЖЕНЫ: {len(stock)} деталей из {len(src_names_display)} файла(ов): {', '.join(n[:20] for n in src_names_display)}"
-         f"  |  ✏️ Измените Остаток (col E) → пересчитаются: График_Поставок, Потребность и Заказы всех месяцев.")
-    fc="1F6B00"; bg=fill("E2EFDA")
+    msg = (f"✅ ОСТАТКИ ЗАГРУЖЕНЫ: {len(stock)} деталей из {len(src_names_display)} файла(ов): {', '.join(n[:20] for n in src_names_display)}"
+           f"  |  ✏️ E = остаток на начало месяца (для Потребность/Заказы)  |  "
+           f"жёлтые колонки по дням = снимок остатка → подставляется в График_Поставок (Ss) вместо формулы")
+    fc = "1F6B00"; bg = fill("E2EFDA")
 else:
-    msg="ОСТАТКИ НЕ ЗАГРУЖЕНЫ. Загрузите xlsx/csv с двумя колонками: [Код детали, Кол-во]  |  ✏️ Колонка E — ручной ввод остатков"
-    fc="C00000"; bg=fill("FFD7D7")
-c2=ws_man.cell(2,1); c2.value=msg; c2.font=Font(bold=True,size=9,color=fc,name="Arial")
-c2.fill=bg; c2.alignment=Alignment(horizontal='left',vertical='center')
-ws_man.merge_cells('A2:E2')
-for ri,code in enumerate(all_codes,3):
-    ws_man.row_dimensions[ri].height=14
-    fb=GRY_F if ri%2==0 else NO_F
-    name,supp,unit=get_info(code); stk=stock.get(code,0)
-    for ci,v in enumerate([code,name[:50],supp,unit,stk],1):
-        c=ws_man.cell(ri,ci); c.value=v
-        c.font=Font(size=9,name="Arial")
-        c.alignment=Alignment(horizontal='left' if ci<=2 else 'center',vertical='center')
-        if ci==5: c.fill=YEL_F; c.number_format='#,##0.##'
-        elif fb: c.fill=fb
+    msg = ("ОСТАТКИ НЕ ЗАГРУЖЕНЫ. Загрузите xlsx/csv: [Код детали, Кол-во]  |  "
+           "✏️ E — остаток на нач.мес.; жёлтые ячейки по датам — ручной снимок для График_Поставок")
+    fc = "C00000"; bg = fill("FFD7D7")
+c1 = ws_man.cell(1, 1); c1.value = msg
+c1.font = Font(bold=True, size=9, color=fc, name="Arial")
+c1.fill = bg; c1.alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
+ws_man.merge_cells(f'A1:{get_column_letter(_total_cols_man)}1')
 
-# ── Precompute: Ss-колонка последнего дня мая в График_Поставок ─────────────
+for mnum_m, mlabel_m, ndays_m in MONTHS:
+    first_di = sum(nd for mn, _, nd in MONTHS if mn < mnum_m)
+    last_di = first_di + ndays_m - 1
+    col_first = _MAN_STOCK_FIRST_DATE_COL + first_di
+    col_last = _MAN_STOCK_FIRST_DATE_COL + last_di
+    mc = ws_man.cell(2, col_first)
+    mc.value = mlabel_m
+    mc.font = Font(bold=True, size=10, color="FFFFFF", name="Arial")
+    mc.fill = M_FILL[mnum_m]
+    mc.alignment = Alignment(horizontal='center', vertical='center')
+    ws_man.merge_cells(f'{get_column_letter(col_first)}2:{get_column_letter(col_last)}2')
+
+for di, (dt, mnum_h, _) in enumerate(all_dates):
+    ci = _MAN_STOCK_FIRST_DATE_COL + di
+    c_sh = ws_man.cell(_MAN_STOCK_HDR_ROW, ci)
+    c_sh.value = dt.strftime('%d.%m')
+    c_sh.font = Font(bold=True, color="FFFFFF", size=8, name="Arial")
+    c_sh.fill = M_FILL[mnum_h]
+    c_sh.alignment = Alignment(horizontal='center', vertical='center')
+    ws_man.column_dimensions[get_column_letter(ci)].width = 5.5
+
+for ri, code in enumerate(all_codes, _MAN_STOCK_DATA_START):
+    stock_input_row[code] = ri
+    ws_man.row_dimensions[ri].height = 14
+    fb = GRY_F if ri % 2 == 0 else NO_F
+    name, supp, unit = get_info(code)
+    stk = stock.get(code, 0)
+    snaps = manual_stock_by_date.get(code, {})
+    for ci, v in enumerate([code, name[:50], supp, unit, stk], 1):
+        c = ws_man.cell(ri, ci); c.value = v
+        c.font = Font(size=9, name="Arial")
+        c.alignment = Alignment(horizontal='left' if ci <= 2 else 'center', vertical='center')
+        if ci == _MAN_STOCK_OPEN_COL:
+            c.fill = YEL_F; c.number_format = '#,##0.##'
+        elif fb:
+            c.fill = fb
+    for di, (dt, _, _) in enumerate(all_dates):
+        ci = _MAN_STOCK_FIRST_DATE_COL + di
+        snap_v = snaps.get(dt)
+        c = ws_man.cell(ri, ci)
+        if snap_v is not None:
+            c.value = snap_v
+        c.fill = YEL_F
+        c.number_format = '#,##0.##'
+        c.font = Font(size=9, name="Arial")
+        c.alignment = Alignment(horizontal='center', vertical='center')
+
+# ── Precompute: Ss-колонка последнего дня месяца в График_Поставок ─────────────
 # График_Поставок: col A=Код, для дня di:
-#   Del-col = 8 + di*2       (чётный offset)
-#   Ss-col  = 8 + di*2 + 1   (нечётный offset) ← именно её используем для VLOOKUP
-# Данные начинаются с row 4 (_gp_data_start=4).
+#   Ss-col  = 8 + di*2       (дата дд.мм, остаток)
+#   Del-col = 8 + di*2 + 1   (📦 поставка — только если есть спрос в этот день)
 _gp_last_mon_col = {}  # mnum -> (col_letter, col_num) Ss-колонки последнего дня месяца
 for _di, (_dt, _mn, _d) in enumerate(all_dates):
-    _cn = 8 + _di * 2 + 1   # Ss-колонка (нечётный offset)
+    _cn = 8 + _di * 2
     _gp_last_mon_col[_mn] = (get_column_letter(_cn), _cn)
 # После цикла: _gp_last_mon_col[5] = Ss последнего дня мая (May 31)
 # Для июля: используем Потребность_Jun col I (Дефицит = остаток после июньского спроса)
@@ -2740,7 +3228,7 @@ def _chem_cars(code, month_num, fut_only=False):
     for tab in tabs:
         if tab not in plan_batches or month_num not in plan_batches[tab]: continue
         for bv, day_qty in plan_batches[tab][month_num].items():
-            bi = batch_info.get(bv, {})
+            bi = _get_batch_info(tab, bv)
             if bi.get('model', '') not in applicable_models: continue
             for day, cars in day_qty.items():
                 if fut_only and month_num == STOCK_AS_OF_MONTH and day <= STOCK_AS_OF_DAY: continue
@@ -3013,12 +3501,10 @@ for mi_ord,(mnum,mlabel,n_days) in enumerate(MONTHS):
             _c12.alignment = Alignment(horizontal='center', vertical='center')
             if fb: _c12.fill = fb
 
-# ── График_Поставок ── структура как DeliveryMay/June: Del | Ss на каждый день ──
+# ── График_Поставок ── Ss | Del на каждый день ──
 # Для каждого дня d — 2 колонки:
-#   ci_del = 8 + di*2      → Поставка (авто-расчёт, =0 если не нужна)
-#   ci_ss  = 8 + di*2 + 1  → Остаток  (= prev_Ss - Спрос_d + Поставка_d)
-# Логика поставки: если (Ss_d - Спрос_{d+1}) < страховой → поставить CEILING(...)*pkg
-# Это зеркало логики DeliveryMay, но автоматизированное.
+#   ci_ss  = 8 + di*2      → Остаток (дата дд.мм; = prev_Ss - Спрос_d + Поставка_d)
+#   ci_del = 8 + di*2 + 1  → Поставка (📦; только если спрос_d > 0 и остаток < страх.)
 print("  График_Поставок (Del|Ss по дням)...")
 from openpyxl.formatting.rule import FormulaRule as _FR_gp
 ws_g = wb_out.create_sheet('График_Поставок')
@@ -3029,12 +3515,43 @@ ws_g.row_dimensions[3].height = 20
 
 _n_day_cols_gp = len(all_dates)           # 92 дня
 _total_cols_gp = 7 + _n_day_cols_gp * 2  # 7 fix + 2*92 = 191
+_POTREB_DAY_COL_START = len(FH)         # 9 фикс. колонок → день 1 = col 10
+
+def _gp_demand_ref(gp_ri, mnum, day_d):
+    """Дневной спрос из Потребность_* (строка на 1 выше, чем в График_Поставок)."""
+    sname = f"Потребность_{MONTH_SHORT[mnum]}"
+    col = get_column_letter(_POTREB_DAY_COL_START + day_d)
+    prow = gp_ri - 1
+    cell = f"{sname}!{col}{prow}"
+    return f"IF(ISBLANK({cell}),0,{cell})"
+
+def _gp_ci_ss(di):
+    return 8 + di * 2
+
+def _gp_ci_del(di):
+    return 8 + di * 2 + 1
+
+def _gp_prev_ss_ref(gp_ri, di):
+    if di == 0:
+        return f"G{gp_ri}"
+    return f"{get_column_letter(_gp_ci_ss(di - 1))}{gp_ri}"
+
+def _gp_del_formula(gp_ri, di):
+    """Поставка только в день спроса: если (остаток_нач − спрос) < страхового → CEILING×уп."""
+    _, mnum, day_d = all_dates[di]
+    prev_ss = _gp_prev_ss_ref(gp_ri, di)
+    dem_today = _gp_demand_ref(gp_ri, mnum, day_d)
+    proj = f"({prev_ss}-{dem_today})"
+    return (
+        f"=IF(AND({dem_today}>0,{proj}<F{gp_ri}),"
+        f"CEILING(MAX(0,F{gp_ri}-{proj})/E{gp_ri},1)*E{gp_ri},0)"
+    )
 
 # Строка 1: заголовок
 t = ws_g.cell(1, 1)
 t.value = (f"ГРАФИК ПОСТАВОК | {PERIOD_LABEL}  |  "
            "🟢 Поставка  🔴 Дефицит  🟡 Ниже страх.запаса  "
-           "Остаток G = живой (из Ввод_Остатков)  |  "
+           "G = остаток нач.мес.  |  📦 только в дни спроса (кол. после даты)  |  "
            "Ecoal'yance: 1×/мес (1–5) | Ecotexis: +35д от заказа | "
            f"Purem/SMC: 1×/нед | SMC ≤{SMC_MAX_PALLETS_PER_TRUCK} палл./фура")
 t.font = Font(bold=True, size=9, color="FFFFFF", name="Arial")
@@ -3043,13 +3560,14 @@ t.alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
 ws_g.merge_cells(f'A1:{get_column_letter(_total_cols_gp)}1')
 
 # Строка 2: месячные метки (объединённые)
-_GP_FIX_H = ['Код детали','Наименование','Поставщик','Ед.','Уп.','Страх.\nшт','Остаток\n(Ввод.Ост.)']
+_GP_FIX_H = ['Код детали','Наименование','Поставщик','Ед.','Уп.','Страх.\nшт','Остаток\n(нач.мес.)']
 _GP_FIX_W = [22, 42, 16, 5, 5, 9, 11]
 for ci, (h, w) in enumerate(zip(_GP_FIX_H, _GP_FIX_W), 1):
     hcell(ws_g, 2, ci, h, H_FILL)
     hcell(ws_g, 3, ci, h, H_FILL)
     ws_g.column_dimensions[get_column_letter(ci)].width = w
-ws_g.merge_cells(f'A2:G3')  # fix headers span rows 2-3
+# Fixed headers stay unmerged so Excel can expose autofilter dropdowns
+# for Код/Наименование/Поставщик and the other static columns.
 
 # Месячные метки в строке 2 над днями
 for mnum_m, mlabel_m, ndays_m in MONTHS:
@@ -3064,25 +3582,23 @@ for mnum_m, mlabel_m, ndays_m in MONTHS:
     mc.alignment = Alignment(horizontal='center', vertical='center')
     ws_g.merge_cells(f'{get_column_letter(col_first)}2:{get_column_letter(col_last)}2')
 
-# Строка 3: чередующиеся заголовки «📦» | «дд.мм»
+# Строка 3: чередующиеся заголовки «дд.мм» | «📦»
 _DEL_FILL = fill("C6EFCE")   # зелёный — колонка поставки
 for di, (dt, mnum_h, d_h) in enumerate(all_dates):
-    ci_del = 8 + di * 2
-    ci_ss  = 8 + di * 2 + 1
-    # Заголовок Del
-    c_dh = ws_g.cell(3, ci_del)
-    c_dh.value = '📦'
-    c_dh.font  = Font(bold=True, size=8, name="Arial")
-    c_dh.fill  = _DEL_FILL
-    c_dh.alignment = Alignment(horizontal='center', vertical='center')
-    ws_g.column_dimensions[get_column_letter(ci_del)].width = 5.5
-    # Заголовок Ss
+    ci_ss  = _gp_ci_ss(di)
+    ci_del = _gp_ci_del(di)
     c_sh = ws_g.cell(3, ci_ss)
     c_sh.value = dt.strftime('%d.%m')
     c_sh.font  = Font(bold=True, color="FFFFFF", size=8, name="Arial")
     c_sh.fill  = M_FILL[mnum_h]
     c_sh.alignment = Alignment(horizontal='center', vertical='center')
     ws_g.column_dimensions[get_column_letter(ci_ss)].width = 5.5
+    c_dh = ws_g.cell(3, ci_del)
+    c_dh.value = '📦'
+    c_dh.font  = Font(bold=True, size=8, name="Arial")
+    c_dh.fill  = _DEL_FILL
+    c_dh.alignment = Alignment(horizontal='center', vertical='center')
+    ws_g.column_dimensions[get_column_letter(ci_del)].width = 5.5
 
 # Данные: строки 4+
 _gp_data_start = 4
@@ -3097,12 +3613,6 @@ for ri, code in enumerate(mrp_codes, _gp_data_start):
     avg_daily  = total_3m / n_days_3m if n_days_3m else 0
     safety_qty = round(avg_daily * sd, 2)
     stk_fallback = int(stock.get(code, 0))
-    # Обнуляем спрос до даты актуальности остатков (включительно) — эти дни уже прошли
-    _code_sdate = get_stock_date(code)
-    daily_dem = [
-        round(demand[code].get(mn, {}).get(d, 0), 4) if dt > _code_sdate else 0.0
-        for (dt, mn, d) in all_dates
-    ]
 
     # A-E: статика
     for ci, v in enumerate([code, name[:46], supp, unit, pkg], 1):
@@ -3117,33 +3627,28 @@ for ri, code in enumerate(mrp_codes, _gp_data_start):
     cf.alignment = Alignment(horizontal='center', vertical='center')
     cf.fill = fill("FFF2CC")
 
-    # G: живой остаток из Ввод_Остатков (VLOOKUP)
+    # G: остаток на начало месяца (для расчёта потребности; не меняется при снимках по дням)
     cg = ws_g.cell(ri, 7)
-    cg.value = f"=IFERROR(VLOOKUP(A{ri},Ввод_Остатков!$A:$E,5,0),{stk_fallback})"
+    cg.value = stk_fallback
     cg.font = Font(size=9, name="Arial", bold=True); cg.number_format = '#,##0'
     cg.alignment = Alignment(horizontal='center', vertical='center')
     cg.fill = CYN_F
 
-    # H+: Del — из Python (правила поставщика); Ss — формула от prev и Del
-    _sched = DELIVERY_SCHEDULES.get(code, {})
-    _sched_dels = _sched.get('dels', [0.0] * len(all_dates))
+    # H+: Ss (остаток) | Del (поставка только в дни спроса)
+    _man_ri = stock_input_row.get(code)
     for di, (dt, mnum_d, day_d) in enumerate(all_dates):
-        ci_del = 8 + di * 2
-        ci_ss  = 8 + di * 2 + 1
-        prev_ss  = f"G{ri}" if di == 0 else f"{get_column_letter(8 + (di-1)*2 + 1)}{ri}"
-        dem_d    = daily_dem[di]
+        ci_ss  = _gp_ci_ss(di)
+        ci_del = _gp_ci_del(di)
+        prev_ss  = _gp_prev_ss_ref(ri, di)
+        dem_expr = _gp_demand_ref(ri, mnum_d, day_d)
         del_col  = get_column_letter(ci_del)
-        del_val  = _sched_dels[di] if di < len(_sched_dels) else 0.0
-        ss_formula = f"={prev_ss}-{dem_d}+{del_col}{ri}"
+        _man_ci = stock_input_date_col.get(dt)
+        if _man_ri and _man_ci:
+            _man_cell = f"Ввод_Остатков!{get_column_letter(_man_ci)}{_man_ri}"
+            ss_formula = f"=IF(ISNUMBER({_man_cell}),{_man_cell},{prev_ss}-{dem_expr}+{del_col}{ri})"
+        else:
+            ss_formula = f"={prev_ss}-{dem_expr}+{del_col}{ri}"
 
-        c_del = ws_g.cell(ri, ci_del)
-        c_del.value = del_val if del_val else None
-        c_del.font = Font(size=8, name="Arial", bold=True)
-        c_del.number_format = '#,##0'
-        c_del.alignment = Alignment(horizontal='center', vertical='center')
-        # Leave fill for conditional formatting
-
-        # Write Ss cell
         c_ss = ws_g.cell(ri, ci_ss)
         c_ss.value = ss_formula
         c_ss.font = Font(size=8, name="Arial")
@@ -3151,23 +3656,31 @@ for ri, code in enumerate(mrp_codes, _gp_data_start):
         c_ss.alignment = Alignment(horizontal='center', vertical='center')
         if fb: c_ss.fill = fb
 
+        c_del = ws_g.cell(ri, ci_del)
+        c_del.value = _gp_del_formula(ri, di)
+        c_del.font = Font(size=8, name="Arial", bold=True)
+        c_del.number_format = '#,##0'
+        c_del.alignment = Alignment(horizontal='center', vertical='center')
+
 # Условное форматирование
 _gp_last_row = _gp_data_start + len(mrp_codes) - 1
-# Del колонки (H, J, L, ...): зелёный если > 0
+_gp_filter_last_row = max(_gp_last_row, 3)
+ws_g.auto_filter.ref = f"A3:{get_column_letter(_total_cols_gp)}{_gp_filter_last_row}"
+# Del колонки (I, K, M, ...): зелёный если > 0
 _del_range = f"H{_gp_data_start}:{get_column_letter(_total_cols_gp)}{_gp_last_row}"
 ws_g.conditional_formatting.add(_del_range, _FR_gp(
-    formula=[f"AND(COLUMN(H{_gp_data_start})<>COLUMN(H{_gp_data_start})+1,H{_gp_data_start}>0,MOD(COLUMN(H{_gp_data_start})-8,2)=0)"],
+    formula=[f"AND(MOD(COLUMN(H{_gp_data_start})-8,2)=1,H{_gp_data_start}>0)"],
     fill=PatternFill("solid", fgColor="C6EFCE"),
     font=Font(color="375623", bold=True, size=8, name="Arial")))
-# Ss колонки: красный если < 0
-_ss_range = f"I{_gp_data_start}:{get_column_letter(_total_cols_gp)}{_gp_last_row}"
+# Ss колонки (H, J, L, ...): красный если < 0
+_ss_range = f"H{_gp_data_start}:{get_column_letter(_total_cols_gp)}{_gp_last_row}"
 ws_g.conditional_formatting.add(_ss_range, _FR_gp(
-    formula=[f"AND(MOD(COLUMN(I{_gp_data_start})-8,2)=1,I{_gp_data_start}<0)"],
+    formula=[f"AND(MOD(COLUMN(H{_gp_data_start})-8,2)=0,H{_gp_data_start}<0)"],
     fill=PatternFill("solid", fgColor="FFC7CE"),
     font=Font(color="9C0006", bold=True, size=8, name="Arial")))
 # Ss колонки: жёлтый если ниже страхового
 ws_g.conditional_formatting.add(_ss_range, _FR_gp(
-    formula=[f"AND(MOD(COLUMN(I{_gp_data_start})-8,2)=1,I{_gp_data_start}>=0,I{_gp_data_start}<$F{_gp_data_start})"],
+    formula=[f"AND(MOD(COLUMN(H{_gp_data_start})-8,2)=0,H{_gp_data_start}>=0,H{_gp_data_start}<$F{_gp_data_start})"],
     fill=PatternFill("solid", fgColor="FFEB9C"),
     font=Font(color="9C5700", size=8, name="Arial")))
 
@@ -3357,25 +3870,20 @@ def _risk_avg_daily(code):
 
 
 def _risk_balance_series(code):
-    """Дневной баланс по графику поставок; стартовый остаток — фактический (в т.ч. ручной)."""
-    _code_sdate = get_stock_date(code)
+    """Дневной баланс по графику поставок (все дни с потребностью в горизонте)."""
     pairs = DELIVERY_SCHEDULES.get(code, {}).get('pairs', {})
     stk0 = float(stock.get(code, 0) or 0)
     series = []
     for di, (dt, mnum, d) in enumerate(all_dates):
-        if dt <= _code_sdate:
-            series.append({'dt': dt, 'mn': mnum, 'd': d, 'bal': stk0, 'del': 0.0})
-        else:
-            del_d, bal = pairs.get(di, (0.0, stk0))
-            series.append({'dt': dt, 'mn': mnum, 'd': d, 'bal': bal, 'del': del_d})
+        del_d, bal = pairs.get(di, (0.0, stk0))
+        series.append({'dt': dt, 'mn': mnum, 'd': d, 'bal': bal, 'del': del_d})
     return series
 
 
 def _risk_simulation(code):
     """Дефицит по симуляции графика; справочно — ближайшие поставки и дата закрытия."""
-    _code_sdate = get_stock_date(code)
     series = _risk_balance_series(code)
-    upcoming = [(s['dt'], s['del']) for s in series if s['dt'] > _code_sdate and s['del'] > 0]
+    upcoming = [(s['dt'], s['del']) for s in series if s['del'] > 0]
 
     first_def = None
     min_bal = float(stock.get(code, 0) or 0)
@@ -3383,8 +3891,6 @@ def _risk_simulation(code):
     in_def = False
 
     for s in series:
-        if s['dt'] <= _code_sdate:
-            continue
         if s['bal'] < min_bal:
             min_bal = s['bal']
         if s['bal'] < 0:
@@ -3806,8 +4312,8 @@ for ri, row_data in enumerate(CFG_DATA, 3):
 print(f"    Конфигурации: {len(CFG_DATA)} конфигураций")
 
 # ═══ Сохраняем ═══════════════════════════════════════════════
-wb_out.save(OUT)
-print(f"\n✅ Готово! Файл сохранён: {OUT}")
+OUT_SAVED = _save_workbook_safe(wb_out, OUT)
+print(f"\n✅ Готово! Файл сохранён: {OUT_SAVED}")
 print(f"   Расчётный период: {PERIOD_LABEL}")
 print(f"   Листы: {[s.title for s in wb_out.worksheets]}")
 
