@@ -1,0 +1,243 @@
+  ⚠️  Файл не найден: Упаковка локала
+  ⚠️  Файл не найден: Additional
+[INIT] ℹ️  GWM-файл не найден — используем существующий файл статистики
+[INIT] ROOT = /home/user/HMMR
+[INIT] Plan-Fact: 2026_Plan-Fact-②(1).xlsx
+[INIT] BOM:       Master_BOM_актуальный.xlsx
+[INIT] Теор.ост.: не найден (необязательно)
+[INIT] Бамперы:   ❌ НЕ НАЙДЕН
+[INIT] PaintStats:Order_calculation_statistics_UPDATED.xlsx
+[INIT] Найдено 0 файлов остатков (типовые: 0, новые: 0):
+[INIT] Режим запуска: потребность + графики поставок (всегда) | месячные заказы: выкл | выгрузка поставщикам: выкл
+[INIT] Расчётный период: Авг–Окт 2026  (остатки: 20.08.2026, расчёт с 20.08.2026)
+Loading V7 reference data (embedded)...
+[INIT] Норма ALAB000046 A08 переведена из кг в граммы (71.8 г/авто)
+[INIT] Эфтек в кг: ALAB001571, ALAB001572, ALAB001573, ALAC011940, ALAC011941 (нормы г → кг)
+  tab_map=624, chem=47, bumper=44, v7_daily=621, color_paints=11
+
+Loading stock from files...
+  Итого: 0 деталей с ненулевым остатком из 0 файла(ов)
+  ℹ️  Добавьте xlsx/xls с остатками в папку MRP (все вкладки сканируются автоматически)
+
+[INIT] Теоретические остатки: файл не найден (необязательно)
+
+Loading safety stock days...
+  ℹ️  Файл /home/user/HMMR/Stock in days.xlsx не найден — используется SAFETY_DAYS=7
+
+Loading Master BOM from: Master_BOM_актуальный.xlsx
+  BOM col offset: 1 | конфигов: 21
+  ⊘ Исключён устаревший код: 1205659XKJ22A
+  ⊘ Исключён устаревший код: 1205658XKJ22A
+  ⊘ Исключён устаревший код: 1205660XKJ22A
+  ⊘ Исключён устаревший код: 1205657XKJ22A
+  ⊘ Исключён устаревший код: 1205656XKJ22A
+  ⊘ Исключён устаревший код: 1201UQ8XGW01A
+  ⊘ Исключён устаревший код: 1201UQ9XGW01A
+  ⊘ Исключён устаревший код: 1201UR1XGW01A
+  ⊘ Исключён устаревший код: 1201UR2XGW01A
+  ⊘ Исключён устаревший код: 8400751XST11A
+  ⊘ Исключён устаревший код: 8400752XST11A
+  ⊘ Исключён устаревший код: 8400451XST11A
+  ⊘ Исключён устаревший код: 8400452XST11A
+  ⊘ Исключён устаревший код: 5401571XST33A
+  ⊘ Исключён устаревший код: 5401572XST33A
+  ⊘ Исключён устаревший код: 5301120XST11A
+  ⊘ Исключён устаревший код: 5301501XST11A
+  ⊘ Исключён устаревший код: 5401871XST33A
+  ⊘ Исключён устаревший код: 5401872XST33A
+  660 деталей в BOM | 0 разделов | Режим: Источник: Master_BOM_актуальный.xlsx
+  ♻️  Разделы BOM перегруппированы по Master_BOM_актуальный.xlsx: 27 разделов
+  Остатки по расчётным деталям: 0 кодов
+Loading packaging...
+  ⚠️  Файл не найден: Упаковка локала (—)
+  Переопределено упаковок (PACKAGE_OVERRIDES): 14
+  Без потребности (встроенный список): ['3101100XKN46A', '3101102XKN46A', '3101105XKN46A']
+  BOM применяемость LK015530: ['B04_4WD_TechPlus', 'B04_4WD_premium']
+  Переопределено применяемостей BOM: 1
+  Исключено из потребности (применяемость очищена): 3 кодов
+  Колёса B02 elite → добавлен B02_2WD_elite: 1 код(ов)
+  Замена красок (Litum): ALAA004586→ALAA009173 с Aug, ALAA003257→ALAA009165 с Sep
+  Частичный грунт (Litum): ALAA003256/ALAA009164 (ALAA004586) с Aug, ALAA003255/ALAA009163 (ALAA003257) с Sep
+Loading Additional.xlsx...
+  Additional error: [Errno 2] No such file or directory: ''
+  Бамперы без упаковки в локале → default (перед 10 / зад 8): 44
+  NDKT: упаковки приведены к схеме (XST33A=30, прочие колёса=24): 11 кодов
+  ⚠️  Файл «страх.запасы ЛИР» не найден — страх.запасы Lear по умолчанию
+  Бамперы: вкладка AS_in_F_A, применяемость из BOM → 44 кодов
+
+Total parts in MRP: 665 (исключено устаревших: 21)
+  Переопределено вкладок по поставщикам: 75
+  Переопределено вкладок по префиксам:   6
+  Переопределено вкладок по точечным кодам: 47
+  В расчётах (потребность/заказы/поставки/риск): 649 из 665
+  Исключено без применяемости в BOM: 8
+Parsing plan tabs...
+  WS_in (5)/8: 121 batches, 12755 cars
+  WS_in_H/8: 44 batches, 2560 cars
+  PS_in/8: 121 batches, 12700 cars
+  PS_in_H_B/8: 43 batches, 2535 cars
+  AS_in_F_A/8: 119 batches, 12455 cars
+  AS_in_H_B/8: 41 batches, 2390 cars
+
+Loading paint statistics (batch → color)...
+  ✅ Paint stats loaded: 4318 batches with colour split
+  ✅ Все партии плана имеют цветовые данные (ничего не выпадает).
+
+Pre-computing demand...
+  Parts with demand > 0: 614 / 649
+  6803112XKN08A: May=0.0  tab=AS_in_H_B
+  ALAA005669: May=1620.0  tab=PS_in PS_in_H_B
+  1101100AGW01A: May=1440.0  tab=AS_in_F_A
+  2803104XKN61A8T: May=120.0  tab=AS_in_F_A
+  2803120XST33A8T: tab=AS_in_F_A BOM=['A01_2WD_comfort', 'A01_2WD_elite', 'A01_2WD_premium', 'A01_4WD_elite', 'A01_4WD_premium']
+    Aug 2026 day6=60 clr=GOLDEN_BLACK
+        AS_in_F_A/RAW2297(A01_2WD_premium) plan_cars=120.0 paint=EXACT paint_total=120 share[GOLDEN_BLACK]=0.500 -> 60 | [WHITE_C1:60,GOLDEN_BLACK:60]
+        AS_in_F_A/RAW2298(A01_2WD_premium) plan_cars=120.0 paint=EXACT paint_total=120 share[GOLDEN_BLACK]=0.000 -> 0 | [WHITE_C1:120]
+    Sep 2026 day6=0 clr=GOLDEN_BLACK
+    Oct 2026 day6=0 clr=GOLDEN_BLACK
+  2804104AST33A8T: tab=AS_in_F_A BOM=['A01_2WD_comfort', 'A01_2WD_elite', 'A01_2WD_premium', 'A01_4WD_elite', 'A01_4WD_premium']
+    Aug 2026 day6=60 clr=GOLDEN_BLACK
+        AS_in_F_A/RAW2297(A01_2WD_premium) plan_cars=120.0 paint=EXACT paint_total=120 share[GOLDEN_BLACK]=0.500 -> 60 | [WHITE_C1:60,GOLDEN_BLACK:60]
+        AS_in_F_A/RAW2298(A01_2WD_premium) plan_cars=120.0 paint=EXACT paint_total=120 share[GOLDEN_BLACK]=0.000 -> 0 | [WHITE_C1:120]
+    Sep 2026 day6=0 clr=GOLDEN_BLACK
+    Oct 2026 day6=0 clr=GOLDEN_BLACK
+  2803120XST33A9C: tab=AS_in_F_A BOM=['A01_2WD_comfort', 'A01_2WD_elite', 'A01_2WD_premium', 'A01_4WD_elite', 'A01_4WD_premium']
+    Aug 2026 day6=180 clr=WHITE_C1
+        AS_in_F_A/RAW2297(A01_2WD_premium) plan_cars=120.0 paint=EXACT paint_total=120 share[WHITE_C1]=0.500 -> 60 | [WHITE_C1:60,GOLDEN_BLACK:60]
+        AS_in_F_A/RAW2298(A01_2WD_premium) plan_cars=120.0 paint=EXACT paint_total=120 share[WHITE_C1]=1.000 -> 120 | [WHITE_C1:120]
+    Sep 2026 day6=0 clr=WHITE_C1
+    Oct 2026 day6=0 clr=WHITE_C1
+  2804104AST33A9C: tab=AS_in_F_A BOM=['A01_2WD_comfort', 'A01_2WD_elite', 'A01_2WD_premium', 'A01_4WD_elite', 'A01_4WD_premium']
+    Aug 2026 day6=180 clr=WHITE_C1
+        AS_in_F_A/RAW2297(A01_2WD_premium) plan_cars=120.0 paint=EXACT paint_total=120 share[WHITE_C1]=0.500 -> 60 | [WHITE_C1:60,GOLDEN_BLACK:60]
+        AS_in_F_A/RAW2298(A01_2WD_premium) plan_cars=120.0 paint=EXACT paint_total=120 share[WHITE_C1]=1.000 -> 120 | [WHITE_C1:120]
+    Sep 2026 day6=0 clr=WHITE_C1
+    Oct 2026 day6=0 clr=WHITE_C1
+  2803120XST33AC3: tab=AS_in_F_A BOM=['A01_2WD_comfort', 'A01_2WD_elite', 'A01_2WD_premium', 'A01_4WD_elite', 'A01_4WD_premium']
+    Aug 2026 day6=0 clr=C3_GREY
+        AS_in_F_A/RAW2297(A01_2WD_premium) plan_cars=120.0 paint=EXACT paint_total=120 share[C3_GREY]=0.000 -> 0 | [WHITE_C1:60,GOLDEN_BLACK:60]
+        AS_in_F_A/RAW2298(A01_2WD_premium) plan_cars=120.0 paint=EXACT paint_total=120 share[C3_GREY]=0.000 -> 0 | [WHITE_C1:120]
+    Sep 2026 day6=0 clr=C3_GREY
+    Oct 2026 day6=0 clr=C3_GREY
+  2804104AST33AC3: tab=AS_in_F_A BOM=['A01_2WD_comfort', 'A01_2WD_elite', 'A01_2WD_premium', 'A01_4WD_elite', 'A01_4WD_premium']
+    Aug 2026 day6=0 clr=C3_GREY
+        AS_in_F_A/RAW2297(A01_2WD_premium) plan_cars=120.0 paint=EXACT paint_total=120 share[C3_GREY]=0.000 -> 0 | [WHITE_C1:60,GOLDEN_BLACK:60]
+        AS_in_F_A/RAW2298(A01_2WD_premium) plan_cars=120.0 paint=EXACT paint_total=120 share[C3_GREY]=0.000 -> 0 | [WHITE_C1:120]
+    Sep 2026 day6=0 clr=C3_GREY
+    Oct 2026 day6=0 clr=C3_GREY
+  2803130XST33AC3: tab=AS_in_F_A BOM=['A01_4WD_TechPlus']
+    Aug 2026 day6=15 clr=C3_GREY
+        AS_in_F_A/RAS2306(A01_4WD_TechPlus) plan_cars=15.0 paint=EXACT paint_total=120 share[C3_GREY]=1.000 -> 15 | [C3_GREY:120]
+    Sep 2026 day6=0 clr=C3_GREY
+    Oct 2026 day6=0 clr=C3_GREY
+  2804105AST33AC3: tab=AS_in_F_A BOM=['A01_4WD_TechPlus']
+    Aug 2026 day6=15 clr=C3_GREY
+        AS_in_F_A/RAS2306(A01_4WD_TechPlus) plan_cars=15.0 paint=EXACT paint_total=120 share[C3_GREY]=1.000 -> 15 | [C3_GREY:120]
+    Sep 2026 day6=0 clr=C3_GREY
+    Oct 2026 day6=0 clr=C3_GREY
+  Потребность по поставщикам:
+    AAT: 129 поз. | Aug=973760, Sep=0, Oct=0 | day6=38025
+    AKOM: 1 поз. | Aug=7460, Sep=0, Oct=0 | day6=255
+    AVTOKOM: 3 поз. | Aug=21520, Sep=0, Oct=0 | day6=870
+    Autotechnika: 8 поз. | Aug=17320, Sep=0, Oct=0 | day6=695
+    Delian (TEEC): 1 поз. | Aug=11855, Sep=0, Oct=0 | day6=480
+    Ecoal'yance: 5 поз. | Aug=31330, Sep=0, Oct=0 | day6=1215
+    Ecokhim: 6 поз. | Aug=28406, Sep=0, Oct=0 | day6=1119
+    Ecotexis: 1 поз. | Aug=6780, Sep=0, Oct=0 | day6=255
+    Eftec: 5 поз. | Aug=241475, Sep=0, Oct=0 | day6=9352
+    FUYAO: 38 поз. | Aug=73990, Sep=0, Oct=0 | day6=3040
+    GSK: 51 поз. | Aug=136235, Sep=0, Oct=0 | day6=5605
+    GWM (ЭсДжи Групп): 18 поз. | Aug=1977346, Sep=0, Oct=0 | day6=74669
+    Ganto: 4 поз. | Aug=57460, Sep=0, Oct=0 | day6=2360
+    Itelma: 10 поз. | Aug=58420, Sep=0, Oct=0 | day6=2360
+    Knauf: 6 поз. | Aug=26525, Sep=0, Oct=0 | day6=895
+    LAB Industries: 9 поз. | Aug=83571, Sep=0, Oct=0 | day6=3292
+    Lear: 49 поз. | Aug=146125, Sep=0, Oct=0 | day6=6750
+    Lear NN: 45 поз. | Aug=129945, Sep=0, Oct=0 | day6=7020
+    Litum: 5 поз. | Aug=48599, Sep=0, Oct=0 | day6=1710
+    MSA: 41 поз. | Aug=35731, Sep=0, Oct=0 | day6=1665
+    MTS Auto: 6 поз. | Aug=15490, Sep=0, Oct=0 | day6=690
+    NDKT: 8 поз. | Aug=13580, Sep=0, Oct=0 | day6=580
+    Purchasing Section: 2 поз. | Aug=140548, Sep=0, Oct=0 | day6=5605
+    Purem: 21 поз. | Aug=69670, Sep=0, Oct=0 | day6=3365
+    Resmetal: 6 поз. | Aug=88530, Sep=0, Oct=0 | day6=3540
+    Ruspromholod: 1 поз. | Aug=9649, Sep=0, Oct=0 | day6=384
+    SGK: 56 поз. | Aug=228460, Sep=0, Oct=0 | day6=8880
+    SMC: 4 поз. | Aug=7080, Sep=0, Oct=0 | day6=240
+    STP: 21 поз. | Aug=157230, Sep=0, Oct=0 | day6=6570
+    Shuoweijia: 1 поз. | Aug=14245, Sep=0, Oct=0 | day6=590
+    Technoform: 3 поз. | Aug=145001, Sep=0, Oct=0 | day6=5782
+    Uralelastotechnika: 21 поз. | Aug=94760, Sep=0, Oct=0 | day6=3270
+    VM Auto: 6 поз. | Aug=26850, Sep=0, Oct=0 | day6=915
+    Vigor: 1 поз. | Aug=8965, Sep=0, Oct=0 | day6=230
+    YIERTE: 16 поз. | Aug=248423, Sep=0, Oct=0 | day6=9751
+    Yapp: 4 поз. | Aug=11975, Sep=0, Oct=0 | day6=480
+    Yierte: 1 поз. | Aug=23767, Sep=0, Oct=0 | day6=920
+    ZGM: 1 поз. | Aug=14365, Sep=0, Oct=0 | day6=590
+
+Прогнозный расчёт остатков на начало каждого месяца...
+  Прогнозный остаток рассчитан для 649 позиций
+
+Building Excel...
+  Расчёт графиков поставок (Ecoal'yance / Ecotexis / SMC / Purem / Lear)...
+  Ss дефicit до дonабora: 3 дн×код
+  ✅ Дефицит Ss устранён дonабorом поставок
+    NDKT фурование: 25 дн. поставок, 51 машин (лимит 8/день, без вс/праздников), неполных: 25
+  Эфтек: перенесено отгрузок с пн/вс: 25
+  ВМ Авто: перенесено рядов из-за длины кузова: 1
+  Допуски: фура строго по номиналу, целевой Ss −20% (пол Ss≥potr)
+  Загрузка фур выше номинала: SMC: 24 дн. >7 (макс +7157%), 24 дн. >допуска 7 | MSA: 25 дн. >21 (макс +771%), 25 дн. >допуска 21 | Lear: 25 дн. >18 (макс +25456%), 25 дн. >допуска 18 | MSA бамперы XST33: 3 дн. >480 (макс +40%), 3 дн. >допуска 480 | MSA бамперы AST33: 3 дн. >480 (макс +37%), 3 дн. >допуска 480 | Эфтек: 2 дн. требуют 2+ ТС (по 18 т), всего ТС: 23 | YAPP: 1 дн. >960 шт (лимит 4 машины × 240)
+    NDKT: 8 поз. | упрощённая логика: цель = страх.запас по коду (240/480) + спрос след. дня | ПЕРВЫЕ партии плана (AS_in_F_A + AS_in_H_B) — 100% из остатков | упаковка: XST33A бокс 30, прочие колёса стопка 24 | микс колёс (фура 540/384), макс. 3.1 фуры/день
+    Расписаний: 649 | SMC: 4 (≤7 палл.) | Lear: 63 (≤18 палл., 36 пен/фура)
+
+Прогноз CKD (+3 месяца, месячные потребности/заказы)...
+  ⚠️  Папка CKD не найдена — прогноз +3 мес. пропущен
+  Прогноз CKD не построен (нет данных плана)
+  Финальная сверка Ss (как в Excel)...
+    NDKT фурование: 25 дн. поставок, 51 машин (лимит 8/день, без вс/праздников), неполных: 25
+  ✅ Ss по цепочке Excel: 0 дефицитов
+  Переходящие остатки: нач. Sep = конец Aug из графика поставок; нач. Oct = остаток − потребность + заказ Sep
+  Упаковка (редактируемый)...
+    Упаковка: 665 деталей
+  Ввод_Остатков...
+  Ввод_Поставок...
+  Потребность_Aug...
+  Потребность_Sep...
+  Потребность_Oct...
+  Нормы_Расхода...
+  Заказы_*: расчёт отключён (включается галочкой «Месячные заказы»)
+  График_Поставок (Del|Ss по дням)...
+    ... 100/649
+    ... 200/649
+    ... 300/649
+    ... 400/649
+    ... 500/649
+    ... 600/649
+  Аналитика_Оборачиваемости...
+  BOM_Linkage...
+  Сводка_3мес...
+  Прогноз_CKD...
+    Прогноз_CKD: 0 кодов × 4 мес.
+  Планы_Производств...
+    Планы_Производств: 489 строк (сначала Plan-Fact, затем CKD)
+  Риск_Дефицита...
+  BOM_Детальный (редактируемый)...
+    BOM_Детальный: 665 деталей, 27 разделов
+  Исключить_применяемость...
+    Исключить_применяемость: 3 кодов
+    Конфигурации: 22 конфигураций
+  Автофильтр по колонкам включён на всех вкладках; тело без объединений (VLOOKUP-friendly)
+  Порядок листов: ['Риск_Дефицита', 'Ввод_Остатков', 'Планы_Производств', 'График_Поставок', 'Ввод_Поставок', 'Потребность_Aug', 'Потребность_Sep', 'Потребность_Oct', 'Заказы_Aug', 'Заказы_Sep', 'Заказы_Oct', 'Сводка_3мес']...
+
+✅ Готово! Файл сохранён: /home/user/HMMR/MRP_System_v9.xlsx
+   Расчётный период: Авг–Окт 2026
+   Листы: ['Риск_Дефицита', 'Ввод_Остатков', 'Планы_Производств', 'График_Поставок', 'Ввод_Поставок', 'Потребность_Aug', 'Потребность_Sep', 'Потребность_Oct', 'Заказы_Aug', 'Заказы_Sep', 'Заказы_Oct', 'Сводка_3мес', 'Прогноз_CKD', 'Упаковка', 'Нормы_Расхода', 'Аналитика_Оборачиваемости', 'BOM_Linkage', 'BOM_Детальный', 'Исключить_применяемость', 'Конфигурации']
+
+Master BOM sync...
+  Master BOM sync: добавлена колонка B02_2WD_elite (col S)
+  Master BOM sync: 4464 отметок → Master_BOM_актуальный.xlsx (B02_2WD_elite: 189, снято: 9)
+
+Выгрузка графиков поставок по поставщикам...
+  Режим: новая неделя
+  Период выгрузки: 24.08.2026 – 30.08.2026
+  Выгрузка поставщикам отключена (галочка «Выгружать графики поставщиков» в run_mrp_gui или MRP_EXPORT_SUPPLIERS=1)
